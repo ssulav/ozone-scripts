@@ -32,6 +32,8 @@ The script performs the following steps:
 - Proper permissions to stop/start services via CM API
 - Python 3.6+ with `requests` package
 - **For secured clusters**: Kerberos keytab file and principal
+- **SSH connectivity**: Passwordless SSH to CM host and all OM role nodes
+- **Sudo access**: Sudo privileges for running privileged commands on remote hosts (not needed when SSH user is root)
 
 ## Installation
 
@@ -48,7 +50,7 @@ chmod +x ozone_om_bootstrap.py
 ### Basic Usage
 
 ```bash
-# Run with dry-run to see what would happen (unsecured cluster)
+# Run with dry-run to see what would happen (unsecured cluster, root SSH user)
 python ozone_om_bootstrap.py \
   --cm-base-url https://cm:7183 \
   --cluster "Cluster 1" \
@@ -56,7 +58,7 @@ python ozone_om_bootstrap.py \
   --insecure \
   --dry-run
 
-# Run with dry-run (secured cluster with Kerberos)
+# Run with dry-run (secured cluster with Kerberos, root SSH user)
 python ozone_om_bootstrap.py \
   --cm-base-url https://cm:7183 \
   --cluster "Cluster 1" \
@@ -66,7 +68,17 @@ python ozone_om_bootstrap.py \
   --insecure \
   --dry-run
 
-# Run actual bootstrap (unsecured cluster)
+# Run with dry-run (non-root SSH user, requires sudo user)
+python ozone_om_bootstrap.py \
+  --cm-base-url https://cm:7183 \
+  --cluster "Cluster 1" \
+  --follower-host om-node-2.example.com \
+  --ssh-user admin \
+  --sudo-user hdfs \
+  --insecure \
+  --dry-run
+
+# Run actual bootstrap (unsecured cluster, root SSH user)
 python ozone_om_bootstrap.py \
   --cm-base-url https://cm:7183 \
   --cluster "Cluster 1" \
@@ -74,7 +86,7 @@ python ozone_om_bootstrap.py \
   --insecure \
   --yes
 
-# Run actual bootstrap (secured cluster with Kerberos)
+# Run actual bootstrap (secured cluster with Kerberos, root SSH user)
 python ozone_om_bootstrap.py \
   --cm-base-url https://cm:7183 \
   --cluster "Cluster 1" \
@@ -98,6 +110,8 @@ python ozone_om_bootstrap.py \
 - `--list-clusters`: List available clusters and exit
 - `--keytab`: Path to Kerberos keytab file on CM host (required when Ozone security is enabled)
 - `--principal`: Kerberos principal (required when Ozone security is enabled)
+- `--ssh-user`: SSH user for connecting to remote hosts (default: root)
+- `--sudo-user`: Sudo user for running privileged commands (not needed when SSH user is root)
 
 ### Examples
 
@@ -161,7 +175,7 @@ OZONE MANAGER BOOTSTRAP AUTOMATION
 ================================================================================
 **SNAPSHOT CONFIRMATION REQUIRED**
 ================================================================================
-**WARNING: Bootstrap operation may affect existing snapshots**
+** STOP! Do not proceed if the cluster enables Ozone Snapshot. Contact Cloudera Storage Engineering team for further instructions if that is the case. **
 ================================================================================
 Before proceeding, please confirm that:
 1. You have NO snapshots in the Ozone system
@@ -305,7 +319,7 @@ Bootstrap operations may affect existing snapshots in the Ozone system. The scri
 ================================================================================
 **SNAPSHOT CONFIRMATION REQUIRED**
 ================================================================================
-**WARNING: Bootstrap operation may affect existing snapshots**
+** STOP! Do not proceed if the cluster enables Ozone Snapshot. Contact Cloudera Storage Engineering team for further instructions if that is the case. **
 ================================================================================
 Before proceeding, please confirm that:
 1. You have NO snapshots in the Ozone system

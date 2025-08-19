@@ -55,7 +55,8 @@ class OzoneOMBootstrap:
     """Ozone Manager Bootstrap automation class"""
     
     def __init__(self, cm_client: CmClient, cluster_name: str, follower_host: str, 
-                 insecure: bool = False, dry_run: bool = False, keytab: str = None, principal: str = None):
+                 insecure: bool = False, dry_run: bool = False, keytab: str = None, principal: str = None,
+                 ssh_user: str = None, sudo_user: str = None):
         self.cm_client = cm_client
         self.cluster_name = cluster_name
         self.follower_host = follower_host
@@ -98,6 +99,149 @@ class OzoneOMBootstrap:
         self.last_ratis_log_before = None
         self.leader_ratis_log_before = None
         self.follower_ratis_log_before = None
+        
+        # SSH and sudo configuration
+        self.ssh_user = ssh_user
+        self.sudo_user = sudo_user
+    
+    def validate_ssh_connectivity(self) -> bool:
+        """Validate SSH connectivity to CM host and all OM role nodes"""
+        print("[SSH VALIDATION] Validating SSH connectivity...")
+        
+        # Get CM host from base URL
+        try:
+            cm_host = self.cm_client.base_url.split("://")[1].split(":")[0]
+            print(f"[>] CM host: {cm_host}")
+        except Exception as e:
+            print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+            return False
+        
+        # Collect all hosts to validate
+        hosts_to_validate = [cm_host]
+        
+        # Add OM role hosts if we have them
+        if self.om_roles:
+            for role in self.om_roles:
+                host_id = role.get("hostRef", {}).get("hostId")
+                if host_id:
+                    host_info = self.cm_client.get_host_by_id(host_id)
+                    hostname = host_info.get("hostname")
+                    if hostname and hostname not in hosts_to_validate:
+                        hosts_to_validate.append(hostname)
+        
+        print(f"[>] Validating SSH connectivity to {len(hosts_to_validate)} hosts...")
+        
+        # Validate SSH connectivity to each host
+        for host in hosts_to_validate:
+            if not self._test_ssh_connection(host):
+                print(f"ERROR: SSH connection failed to {host}", file=sys.stderr)
+                return False
+            print(f"[>] SSH connection to {host}: OK")
+        
+        print("[>] All SSH connections validated successfully")
+        return True
+    
+    def _test_ssh_connection(self, host: str) -> bool:
+        """Test SSH connection to a specific host"""
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]
+        
+        if self.ssh_user:
+            ssh_cmd.extend(["-l", self.ssh_user])
+        
+        ssh_cmd.extend([host, "echo", "SSH connection successful"])
+        
+        try:
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            print(f"  SSH connection to {host} timed out", file=sys.stderr)
+            return False
+        except Exception as e:
+            print(f"  SSH connection to {host} failed: {e}", file=sys.stderr)
+            return False
+    
+    def validate_sudo_access(self) -> bool:
+        """Validate sudo access and determine sudo user if needed"""
+        print("[SUDO VALIDATION] Validating sudo access...")
+        
+        # Skip sudo validation if SSH user is root
+        if self.ssh_user == "root":
+            print("[>] SSH user is root, skipping sudo validation")
+            return True
+        
+        # Get CM host for sudo validation
+        try:
+            cm_host = self.cm_client.base_url.split("://")[1].split(":")[0]
+        except Exception as e:
+            print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+            return False
+        
+        # Test sudo access on CM host
+        if not self._test_sudo_access(cm_host):
+            print(f"WARNING: Sudo access failed on {cm_host}", file=sys.stderr)
+            
+            # Ask user for sudo user if not provided
+            if not self.sudo_user:
+                print("\n" + "="*60)
+                print("SUDO ACCESS REQUIRED")
+                print("="*60)
+                print("Sudo access is required to run commands on the remote hosts.")
+                print("Please provide a sudo-enabled user account.")
+                print("="*60)
+                
+                try:
+                    sudo_user_input = input("Enter sudo user (or press Enter to abort): ").strip()
+                    if sudo_user_input:
+                        self.sudo_user = sudo_user_input
+                        print(f"[>] Using sudo user: {self.sudo_user}")
+                    else:
+                        print("[>] Aborting due to no sudo user provided")
+                        return False
+                except KeyboardInterrupt:
+                    print("\n[>] Operation aborted by user")
+                    return False
+            
+            # Test sudo access with the provided user
+            if not self._test_sudo_access_with_user(cm_host, self.sudo_user):
+                print(f"ERROR: Sudo access failed with user {self.sudo_user} on {cm_host}", file=sys.stderr)
+                return False
+        
+        print(f"[>] Sudo access validated successfully")
+        return True
+    
+    def _test_sudo_access(self, host: str) -> bool:
+        """Test sudo access on a specific host"""
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]
+        
+        if self.ssh_user:
+            ssh_cmd.extend(["-l", self.ssh_user])
+        
+        ssh_cmd.extend([host, "sudo", "-n", "echo", "sudo access successful"])
+        
+        try:
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+        except Exception as e:
+            return False
+    
+    def _test_sudo_access_with_user(self, host: str, sudo_user: str) -> bool:
+        """Test sudo access with a specific user on a specific host"""
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]
+        
+        if self.ssh_user:
+            ssh_cmd.extend(["-l", self.ssh_user])
+        
+        ssh_cmd.extend([host, f"sudo -u {sudo_user} -n echo 'sudo access successful'"])
+        
+        try:
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+        except Exception as e:
+            return False
         
     def discover_cluster_info(self) -> bool:
         """Discover Ozone service and OM roles information"""
@@ -415,7 +559,7 @@ class OzoneOMBootstrap:
     
     def get_om_configuration(self) -> bool:
         """Get OM configuration including database and ratis directories"""
-        print("[1.1] Getting OM configuration...")
+        print("[1.4] Getting OM configuration...")
 
         def _extract_value(item: Dict[str, Any]) -> Optional[str]:
             return (
@@ -728,7 +872,8 @@ class OzoneOMBootstrap:
         print("\n" + "="*80)
         print("**SNAPSHOT CONFIRMATION REQUIRED**")
         print("="*80)
-        print("**WARNING: Bootstrap operation may affect existing snapshots**")
+        print("** STOP! Do not proceed if the cluster enables Ozone Snapshot.\n"
+              "Contact Cloudera Storage Engineering team for further instructions if that is the case. **")
         print("="*80)
         print("Before proceeding, please confirm that:")
         print("1. You have NO snapshots in the Ozone system")
@@ -1103,7 +1248,7 @@ class OzoneOMBootstrap:
             else:
                 print(f"WARNING: Failed to clean up remote temporary directory {self.temp_dir}: {cleanup_result.stderr}")
     
-    def _run_remote_command(self, host: str, command: str) -> subprocess.CompletedProcess:
+    def _run_remote_command(self, host: str, command: str, use_sudo: bool = False) -> subprocess.CompletedProcess:
         """Run a command on a remote host via SSH"""
         
         # If Ozone security is enabled and this is an ozone command, add kinit
@@ -1116,7 +1261,19 @@ class OzoneOMBootstrap:
         else:
             kinit_cmd = command
         
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", host, kinit_cmd]
+        # Add sudo if requested and sudo user is configured (but not when SSH user is root)
+        if use_sudo and self.sudo_user and self.ssh_user != "root":
+            final_cmd = f"sudo -u {self.sudo_user} {kinit_cmd}"
+        else:
+            final_cmd = kinit_cmd
+        
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
+        
+        # Add SSH user if specified
+        if self.ssh_user:
+            ssh_cmd.extend(["-l", self.ssh_user])
+        
+        ssh_cmd.extend([host, final_cmd])
         
         try:
             result = subprocess.run(
@@ -1167,7 +1324,7 @@ class OzoneOMBootstrap:
     
     def check_security_configuration(self) -> bool:
         """Check if Ozone security is enabled and validate Kerberos credentials if needed"""
-        print("[1.2] Checking Ozone security configuration...")
+        print("[1.5] Checking Ozone security configuration...")
         
         if not self.ozone_service:
             print("ERROR: Ozone service not discovered yet", file=sys.stderr)
@@ -1253,8 +1410,11 @@ class OzoneOMBootstrap:
             if not self.discover_cluster_info():
                 return False
             
-            # Step 1.1: Check security configuration (do this before any ozone commands)
-            if not self.check_security_configuration():
+            # Step 1.1: Validate SSH connectivity and sudo access
+            if not self.validate_ssh_connectivity():
+                return False
+            
+            if not self.validate_sudo_access():
                 return False
             
             # Step 1.2: Prompt user to confirm no snapshots exist
@@ -1267,6 +1427,10 @@ class OzoneOMBootstrap:
             
             # Step 1.4: Get configuration (after we have the follower role identified)
             if not self.get_om_configuration():
+                return False
+            
+            # Step 1.5: Check security configuration (do this before any ozone commands)
+            if not self.check_security_configuration():
                 return False
             
             # Step 2.0: Check OM leader health
@@ -1370,20 +1534,24 @@ Examples:
   # List available clusters
   python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --list-clusters --insecure
 
-  # Run bootstrap with dry-run to see what would happen (unsecured cluster)
+  # Run bootstrap with dry-run to see what would happen (unsecured cluster, root SSH user)
   python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --insecure --dry-run
 
-  # Run bootstrap with dry-run (secured cluster with Kerberos)
+  # Run bootstrap with dry-run (secured cluster with Kerberos, root SSH user)
   python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --keytab /etc/security/keytabs/om.keytab --principal om/om-node-2.example.com@REALM \\
     --insecure --dry-run
 
-  # Run actual bootstrap (unsecured cluster)
+  # Run bootstrap with dry-run (non-root SSH user, requires sudo user)
+  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
+    --follower-host om-node-2.example.com --ssh-user admin --sudo-user hdfs --insecure --dry-run
+
+  # Run actual bootstrap (unsecured cluster, root SSH user)
   python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --insecure --yes
 
-  # Run actual bootstrap (secured cluster with Kerberos)
+  # Run actual bootstrap (secured cluster with Kerberos, root SSH user)
   python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --keytab /etc/security/keytabs/om.keytab --principal om/om-node-2.example.com@REALM \\
     --insecure --yes
@@ -1412,6 +1580,10 @@ Examples:
                        help="Path to Kerberos keytab file on remote host (required when Ozone security is enabled)")
     parser.add_argument("--principal",
                        help="Kerberos principal (required when Ozone security is enabled)")
+    parser.add_argument("--ssh-user", default="root",
+                       help="SSH user for connecting to remote hosts (default: root)")
+    parser.add_argument("--sudo-user",
+                       help="Sudo user for running privileged commands (not needed when SSH user is root)")
     
     args = parser.parse_args()
     
@@ -1454,7 +1626,9 @@ Examples:
         insecure=args.insecure,
         dry_run=args.dry_run,
         keytab=args.keytab,
-        principal=args.principal
+        principal=args.principal,
+        ssh_user=args.ssh_user,
+        sudo_user=args.sudo_user
     )
     
     # Run bootstrap
