@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2025 Cloudera, Inc. All Rights Reserved.
+#
+# See the NOTICE file distributed with this work for
+# additional information regarding copyright ownership.
+#
+# Cloudera, Inc. licenses this file to you under the
+# Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 """
 Ozone Manager Bootstrap Automation
 
@@ -37,6 +58,7 @@ import time
 import subprocess
 import tempfile
 import warnings
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, quote
@@ -49,6 +71,14 @@ _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
 (sys.path.insert(0, _REPO_ROOT) if _REPO_ROOT not in sys.path else None)
 
 from common.cm_client import CmClient
+
+
+# Module logger
+logger = logging.getLogger("ozone.om.bootstrap")
+
+def _configure_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 class OzoneOMBootstrap:
@@ -106,14 +136,14 @@ class OzoneOMBootstrap:
     
     def validate_ssh_connectivity(self) -> bool:
         """Validate SSH connectivity to CM host and all OM role nodes"""
-        print("[SSH VALIDATION] Validating SSH connectivity...")
+        logger.info("[SSH VALIDATION] Validating SSH connectivity...")
         
         # Get CM host from base URL
         try:
             cm_host = self.cm_client.base_url.split("://")[1].split(":")[0]
-            print(f"[>] CM host: {cm_host}")
+            logger.info(f"[>] CM host: {cm_host}")
         except Exception as e:
-            print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+            logger.error(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
             return False
         
         # Collect all hosts to validate
@@ -129,16 +159,16 @@ class OzoneOMBootstrap:
                     if hostname and hostname not in hosts_to_validate:
                         hosts_to_validate.append(hostname)
         
-        print(f"[>] Validating SSH connectivity to {len(hosts_to_validate)} hosts...")
+        logger.info(f"[>] Validating SSH connectivity to {len(hosts_to_validate)} hosts...")
         
         # Validate SSH connectivity to each host
         for host in hosts_to_validate:
             if not self._test_ssh_connection(host):
-                print(f"ERROR: SSH connection failed to {host}", file=sys.stderr)
+                logger.error(f"ERROR: SSH connection failed to {host}")
                 return False
-            print(f"[>] SSH connection to {host}: OK")
+            logger.info(f"[>] SSH connection to {host}: OK")
         
-        print("[>] All SSH connections validated successfully")
+        logger.info("[>] All SSH connections validated successfully")
         return True
     
     def _test_ssh_connection(self, host: str) -> bool:
@@ -154,10 +184,10 @@ class OzoneOMBootstrap:
             result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
             return result.returncode == 0
         except subprocess.TimeoutExpired:
-            print(f"  SSH connection to {host} timed out", file=sys.stderr)
+            logger.warning(f"  SSH connection to {host} timed out")
             return False
         except Exception as e:
-            print(f"  SSH connection to {host} failed: {e}", file=sys.stderr)
+            logger.error(f"  SSH connection to {host} failed: {e}")
             return False
     
     def validate_sudo_access(self) -> bool:
@@ -880,13 +910,13 @@ class OzoneOMBootstrap:
         print("2. You understand that bootstrap operations may impact snapshots")
         print("3. You have backed up any important data")
         print("="*80)
-        print("Type 'NO' (exactly as shown) to continue with the bootstrap operation.")
+        print("Type 'Continue' (exactly as shown) to proceed with the bootstrap operation.")
         print("Any other input will abort the operation.")
         print("="*80)
         
         try:
-            user_input = input("Enter 'NO' to continue: ").strip()
-            if user_input == "NO":
+            user_input = input("Enter 'Continue' to proceed: ").strip()
+            if user_input == "Continue":
                 print("[>] User confirmed to proceed with bootstrap operation")
                 return True
             else:
@@ -1584,8 +1614,16 @@ Examples:
                        help="SSH user for connecting to remote hosts (default: root)")
     parser.add_argument("--sudo-user",
                        help="Sudo user for running privileged commands (not needed when SSH user is root)")
+    parser.add_argument("--verbose", action="store_true",
+                       help="Enable verbose (DEBUG) logging")
     
     args = parser.parse_args()
+
+    # Initialize logging
+    _configure_logging()
+    if args.verbose or args.dry_run:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
     
     # Create CM client
     cm_client = CmClient(
@@ -1605,17 +1643,17 @@ Examples:
     
     # Validate required arguments for bootstrap
     if not args.cluster:
-        print("ERROR: --cluster is required for bootstrap operations", file=sys.stderr)
-        print("Use --list-clusters to see available clusters", file=sys.stderr)
+        logger.error("--cluster is required for bootstrap operations")
+        logger.error("Use --list-clusters to see available clusters")
         sys.exit(1)
     
     if not args.follower_host:
-        print("ERROR: --follower-host is required for bootstrap operations", file=sys.stderr)
+        logger.error("--follower-host is required for bootstrap operations")
         sys.exit(1)
     
     # Validate arguments
     if not args.dry_run and not args.yes:
-        print("ERROR: --yes is required for non-dry-run execution", file=sys.stderr)
+        logger.error("--yes is required for non-dry-run execution")
         sys.exit(1)
     
     # Create bootstrap instance
@@ -1635,10 +1673,10 @@ Examples:
     success = bootstrap.run_bootstrap()
     
     if success:
-        print("Bootstrap completed successfully!")
+        logger.info("Bootstrap completed successfully!")
         sys.exit(0)
     else:
-        print("Bootstrap failed!", file=sys.stderr)
+        logger.error("Bootstrap failed!")
         sys.exit(1)
 
 

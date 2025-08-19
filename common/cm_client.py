@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2025 Cloudera, Inc. All Rights Reserved.
+#
+# See the NOTICE file distributed with this work for
+# additional information regarding copyright ownership.
+#
+# Cloudera, Inc. licenses this file to you under the
+# Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 """
 Common Cloudera Manager (CM) API client utilities for cluster-operations scripts.
 
@@ -17,6 +38,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 import time
+import logging
 
 from urllib.parse import quote
 
@@ -300,18 +322,19 @@ class CmClient:
 
     def discover_clusters(self) -> List[Dict[str, Any]]:
         """Discover and display available clusters in Cloudera Manager"""
-        print(f"Connecting to Cloudera Manager at: {self.base_url}")
-        print("-" * 60)
+        logger = logging.getLogger("ozone.cm_client")
+        logger.info(f"Connecting to Cloudera Manager at: {self.base_url}")
+        logger.info("-" * 60)
         
         try:
             clusters = self.list_clusters()
             
             if not clusters:
-                print("No clusters found in Cloudera Manager.")
+                logger.info("No clusters found in Cloudera Manager.")
                 return clusters
             
-            print(f"Found {len(clusters)} cluster(s):")
-            print()
+            logger.info(f"Found {len(clusters)} cluster(s):")
+            logger.info("")
             
             for i, cluster in enumerate(clusters, 1):
                 cluster_name = cluster.get('name', 'Unknown')
@@ -319,25 +342,27 @@ class CmClient:
                 cluster_version = cluster.get('version', 'Unknown')
                 cluster_status = cluster.get('entityStatus', 'Unknown')
                 
-                print(f"{i}. Cluster Name: '{cluster_name}'")
-                print(f"   Display Name: {cluster_display_name}")
-                print(f"   Version: {cluster_version}")
-                print(f"   Status: {cluster_status}")
-                print()
+                logger.info(f"{i}. Cluster Name: '{cluster_name}'")
+                logger.info(f"   Display Name: {cluster_display_name}")
+                logger.info(f"   Version: {cluster_version}")
+                logger.info(f"   Status: {cluster_status}")
+                logger.info("")
             
-            print("Use the exact 'Cluster Name' value in the bootstrap script.")
+            logger.info("Use the exact 'Cluster Name' value in the bootstrap script.")
             if clusters:
-                print("Example:")
-                print(f"  --cluster '{clusters[0]['name']}'")
+                logger.info("Example:")
+                logger.info(f"  --cluster '{clusters[0]['name']}'")
             
             return clusters
             
         except Exception as e:
-            print(f"Error discovering clusters: {e}")
+            logger = logging.getLogger("ozone.cm_client")
+            logger.error(f"Error discovering clusters: {e}")
             return []
 
     def print_cluster_info(self, cluster_name: str) -> bool:
         """Print detailed information about a specific cluster"""
+        logger = logging.getLogger("ozone.cm_client")
         try:
             clusters = self.list_clusters()
             target_cluster = None
@@ -348,34 +373,34 @@ class CmClient:
                     break
             
             if not target_cluster:
-                print(f"Cluster '{cluster_name}' not found.")
-                print("Available clusters:")
+                logger.error(f"Cluster '{cluster_name}' not found.")
+                logger.info("Available clusters:")
                 for cluster in clusters:
-                    print(f"  - '{cluster.get('name')}'")
+                    logger.info(f"  - '{cluster.get('name')}'")
                 return False
             
-            print(f"Cluster Information for '{cluster_name}':")
-            print("-" * 50)
-            print(f"Name: {target_cluster.get('name')}")
-            print(f"Display Name: {target_cluster.get('displayName')}")
-            print(f"Version: {target_cluster.get('version')}")
-            print(f"Status: {target_cluster.get('entityStatus')}")
-            print(f"CDH Version: {target_cluster.get('cdhVersion')}")
-            print(f"Full Version: {target_cluster.get('fullVersion')}")
+            logger.info(f"Cluster Information for '{cluster_name}':")
+            logger.info("-" * 50)
+            logger.info(f"Name: {target_cluster.get('name')}")
+            logger.info(f"Display Name: {target_cluster.get('displayName')}")
+            logger.info(f"Version: {target_cluster.get('version')}")
+            logger.info(f"Status: {target_cluster.get('entityStatus')}")
+            logger.info(f"CDH Version: {target_cluster.get('cdhVersion')}")
+            logger.info(f"Full Version: {target_cluster.get('fullVersion')}")
             
             # List services
             services = self.list_services(cluster_name)
-            print(f"\nServices ({len(services)}):")
+            logger.info(f"\nServices ({len(services)}):")
             for service in services:
                 service_name = service.get('name', 'Unknown')
                 service_type = service.get('type', 'Unknown')
                 service_status = service.get('serviceState', 'Unknown')
-                print(f"  - {service_name} ({service_type}): {service_status}")
+                logger.info(f"  - {service_name} ({service_type}): {service_status}")
             
             return True
             
         except Exception as e:
-            print(f"Error getting cluster info: {e}")
+            logger.error(f"Error getting cluster info: {e}")
             return False
 
 
