@@ -76,13 +76,28 @@ class OzoneOMBootstrap:
         self.ratis_dir = None
         self.om_http_port = None
         self.om_https_port = None
+        self.om_protocol = None
+        self.om_port = None
         
         # Security configuration
         self.ozone_security_enabled = False
+        self.ozone_http_kerberos_enabled = False
         
         # Backup paths
         self.backup_dir = "/backup"
         self.temp_dir = None
+        
+        # Generate unique epoch timestamp for all operations
+        self.epoch_time = int(time.time())
+        self.backup_dir = f"/backup/om_bootstrap_{self.epoch_time}"
+        
+        # Track if OM role was stopped during bootstrap
+        self.om_role_was_stopped = False
+        
+        # Track Ratis log files for comparison
+        self.last_ratis_log_before = None
+        self.leader_ratis_log_before = None
+        self.follower_ratis_log_before = None
         
     def discover_cluster_info(self) -> bool:
         """Discover Ozone service and OM roles information"""
@@ -172,7 +187,7 @@ class OzoneOMBootstrap:
     
     def get_om_roles_from_cli(self) -> bool:
         """Get OM roles using ozone admin command"""
-        print("[1.2] Getting OM roles from ozone admin command...")
+        print("[1.3] Getting OM roles from ozone admin command...")
         
         # Use the CM host from cm-base-url
         try:
@@ -239,6 +254,19 @@ class OzoneOMBootstrap:
             print(f"[>] Follower OMs: {follower_matches}")
             if self.follower_host in follower_matches:
                 print(f"[>] Target follower: {self.follower_host}")
+                
+                # Find the follower role from CM roles
+                for role in self.om_roles:
+                    host_id = role.get("hostRef", {}).get("hostId")
+                    if host_id:
+                        host_info = self.cm_client.get_host_by_id(host_id)
+                        if host_info.get("hostname") == self.follower_host:
+                            self.follower_role = role
+                            print(f"[>] Identified follower role: {role.get('name')}")
+                            break
+                
+                if not self.follower_role:
+                    print(f"WARNING: Could not identify follower role for {self.follower_host}", file=sys.stderr)
             else:
                 print(f"WARNING: Target follower {self.follower_host} not found in follower list", file=sys.stderr)
                 return False
@@ -353,10 +381,33 @@ class OzoneOMBootstrap:
             )
             print(f"[>] Stop command initiated: {result}")
             
-            # Wait for the role to stop
-            time.sleep(30)
-            print(f"[>] Follower OM stopped successfully")
-            return True
+            # Wait for the process to stop by checking for the OzoneManagerStarter process
+            print(f"[>] Waiting for OzoneManagerStarter process to stop...")
+            max_wait_time = 120  # 2 minutes max wait
+            wait_interval = 5    # Check every 5 seconds
+            elapsed_time = 0
+            
+            while elapsed_time < max_wait_time:
+                # Check if the OzoneManagerStarter process is still running
+                check_cmd = f"pgrep -f 'org.apache.hadoop.ozone.om.OzoneManagerStarter'"
+                check_result = self._run_remote_command(self.follower_host, check_cmd)
+                
+                if check_result.returncode != 0:
+                    # Process not found, it has stopped
+                    print(f"[>] OzoneManagerStarter process stopped successfully (after {elapsed_time} seconds)")
+                    self.om_role_was_stopped = True
+                    return True
+                
+                # Process still running, wait and check again
+                time.sleep(wait_interval)
+                elapsed_time += wait_interval
+                print(f"[>] Process still running, waiting... ({elapsed_time}/{max_wait_time} seconds)")
+            
+            # If we reach here, the process didn't stop within the timeout
+            print(f"WARNING: OzoneManagerStarter process did not stop within {max_wait_time} seconds", file=sys.stderr)
+            # print(f"[>] Proceeding anyway, assuming process will stop soon...")
+            self.om_role_was_stopped = False
+            return False
             
         except Exception as e:
             print(f"ERROR: Failed to stop follower OM: {e}", file=sys.stderr)
@@ -364,7 +415,7 @@ class OzoneOMBootstrap:
     
     def get_om_configuration(self) -> bool:
         """Get OM configuration including database and ratis directories"""
-        print("[3.0] Getting OM configuration...")
+        print("[1.1] Getting OM configuration...")
 
         def _extract_value(item: Dict[str, Any]) -> Optional[str]:
             return (
@@ -375,68 +426,132 @@ class OzoneOMBootstrap:
             )
 
         try:
-            # 1) Read service-level configuration first (for HTTP/HTTPS ports)
+            # 1) Read service-level configuration first (for service-level settings)
             svc_cfg = self.cm_client.get_service_config(self.cluster_name, self.ozone_service)
             svc_items = svc_cfg.get("items", [])
-            print(f"[DEBUG] Service config has {len(svc_items)} items")
+            # print(f"[DEBUG] Service config has {len(svc_items)} items")
             
-            # Parse service-level keys
-            for item in svc_items:
-                name = item.get("name") or ""
-                val = _extract_value(item)
-                if name == "ozone.om.http.port" and val:
-                    self.om_http_port = val
-                elif name == "ozone.om.https.port" and val:
-                    self.om_https_port = val
+            # Debug: Show all ozone-related configuration items
+            ozone_items = [item for item in svc_items if "ozone" in (item.get("name") or "").lower()]
+            if ozone_items:
+                # print(f"[DEBUG] Found {len(ozone_items)} ozone-related config items in service config:")
+                for item in ozone_items[:10]:  # Show first 10
+                    name = item.get("name", "")
+                    val = _extract_value(item)
+                    # print(f"[DEBUG]   {name}: {val}")
+                if len(ozone_items) > 10:
+                    # print(f"[DEBUG]   ... and {len(ozone_items) - 10} more")
+                    pass
+            else:
+                # print("[DEBUG] No ozone-related config items found in service config")
+                pass
 
-            # 2) Read from role config group for OZONE_MANAGER (for DB and Ratis dirs)
-            groups = self.cm_client.list_role_config_groups(self.cluster_name, self.ozone_service)
-            om_groups = [g for g in groups if (g.get("roleType") or g.get("roleTypeName") or "").upper() == "OZONE_MANAGER"]
-            if not om_groups:
-                print("ERROR: No OZONE_MANAGER role config groups found", file=sys.stderr)
+            # 2) Read from specific follower role configuration (for DB and Ratis dirs)
+            if not self.follower_role:
+                print("ERROR: Follower role not identified yet", file=sys.stderr)
                 return False
+            
+            follower_role_name = self.follower_role.get("name")
+            if not follower_role_name:
+                print("ERROR: Follower role name not found", file=sys.stderr)
+                return False
+            
+            # Get configuration for the specific follower role
+            role_cfg = self.cm_client.get_role_config(self.cluster_name, self.ozone_service, follower_role_name, view="FULL")
+            role_items = role_cfg.get("items", [])
+            # print(f"[DEBUG] Follower role config has {len(role_items)} items")
+            
+            # If role-specific config is empty, fall back to role config group
+            if not role_items:
+                print(f"[>] No role-specific config found for {follower_role_name}, using role config group...")
+                groups = self.cm_client.list_role_config_groups(self.cluster_name, self.ozone_service)
+                om_groups = [g for g in groups if (g.get("roleType") or g.get("roleTypeName") or "").upper() == "OZONE_MANAGER"]
+                if not om_groups:
+                    print("ERROR: No OZONE_MANAGER role config groups found", file=sys.stderr)
+                    return False
 
-            # Prefer the BASE group if present
-            base_group = None
-            for g in om_groups:
-                gname = g.get("name", "")
-                if gname.endswith("-BASE"):
-                    base_group = g
-                    break
-            if base_group is None:
-                base_group = om_groups[0]
+                # Prefer the BASE group if present
+                base_group = None
+                for g in om_groups:
+                    gname = g.get("name", "")
+                    if gname.endswith("-BASE"):
+                        base_group = g
+                        break
+                if base_group is None:
+                    base_group = om_groups[0]
 
-            base_group_name = base_group.get("name")
-            print(f"[DEBUG] Using role config group: {base_group_name}")
-            group_cfg = self.cm_client.get_role_config_group_config(self.cluster_name, self.ozone_service, base_group_name, view="FULL")
-            group_items = group_cfg.get("items", [])
-            print(f"[DEBUG] Role group has {len(group_items)} items")
+                base_group_name = base_group.get("name")
+                # print(f"[DEBUG] Using role config group: {base_group_name}")
+                group_cfg = self.cm_client.get_role_config_group_config(self.cluster_name, self.ozone_service, base_group_name, view="FULL")
+                role_items = group_cfg.get("items", [])
+                # print(f"[DEBUG] Role group config has {len(role_items)} items")
+            else:
+                print(f"[>] Using role-specific configuration for {follower_role_name}")
 
             # Parse role-level keys
-            for item in group_items:
+            ssl_enabled = False
+            for item in role_items:
                 name = item.get("name") or ""
                 val = _extract_value(item)
                 if name == "ozone.om.db.dirs" and val:
                     self.om_db_dir = val
                 elif name == "ozone.om.ratis.storage.dir" and val:
                     self.ratis_dir = val
+                elif name == "ozone.om.http-port" and val:
+                    self.om_http_port = val
+                    # print(f"[DEBUG] Found ozone.om.http-port in role config: {val}")
+                elif name == "ozone.om.https-port" and val:
+                    self.om_https_port = val
+                    # print(f"[DEBUG] Found ozone.om.https-port in role config: {val}")
+                elif name == "ssl_enabled" and val:
+                    ssl_enabled = val.lower() == "true"
+                    # print(f"[DEBUG] Found ssl_enabled in role config: {val}")
+                # Also check for alternative naming patterns
+                elif name == "ozone.om.http.port" and val:
+                    self.om_http_port = val
+                    # print(f"[DEBUG] Found ozone.om.http.port (alternative) in role config: {val}")
+                elif name == "ozone.om.https.port" and val:
+                    self.om_https_port = val
+                    # print(f"[DEBUG] Found ozone.om.https.port (alternative) in role config: {val}")
 
-            # 3) Fallback to service-level config for DB and Ratis dirs if not found in role config
-            if not self.om_db_dir or not self.ratis_dir:
-                print("[DEBUG] Checking service config for DB and Ratis dirs...")
-                for item in svc_items:
-                    name = item.get("name") or ""
-                    val = _extract_value(item)
-                    if name == "ozone.om.db.dirs" and val and not self.om_db_dir:
-                        self.om_db_dir = val
-                    elif name == "ozone.om.ratis.storage.dir" and val and not self.ratis_dir:
-                        self.ratis_dir = val
+            # 3) Check service-level configurations
+            # print("[DEBUG] Checking service config for additional settings...")
+            for item in svc_items:
+                name = item.get("name") or ""
+                val = _extract_value(item)
+                
+                # Check for HTTP Kerberos configuration (service-level)
+                if name == "ozone.security.http.kerberos.enabled" and val:
+                    self.ozone_http_kerberos_enabled = val.lower() == "true"
+                    # print(f"[DEBUG] Found ozone.security.http.kerberos.enabled in service config: {val}")
+                
+                # Fallback for DB and Ratis dirs if not found in role config
+                elif name == "ozone.om.db.dirs" and val and not self.om_db_dir:
+                    self.om_db_dir = val
+                elif name == "ozone.om.ratis.storage.dir" and val and not self.ratis_dir:
+                    self.ratis_dir = val
 
-            # 4) Validate and log results
+            # 4) Determine protocol based on SSL settings and available ports
+            if ssl_enabled and self.om_https_port:
+                self.om_protocol = "https"
+                self.om_port = self.om_https_port
+                # print(f"[DEBUG] SSL enabled, using HTTPS port: {self.om_https_port}")
+            elif self.om_http_port:
+                self.om_protocol = "http"
+                self.om_port = self.om_http_port
+                # print(f"[DEBUG] Using HTTP port: {self.om_http_port}")
+            else:
+                # Fallback to defaults
+                self.om_protocol = "http"
+                self.om_port = "9874"
+                # print(f"[DEBUG] No ports found, using default: {self.om_protocol}://host:{self.om_port}")
+
+            # 5) Validate and log results
             print(f"[>] OM DB directory: {self.om_db_dir}")
             print(f"[>] Ratis directory: {self.ratis_dir}")
-            print(f"[>] OM HTTP port: {self.om_http_port}")
-            print(f"[>] OM HTTPS port: {self.om_https_port}")
+            print(f"[>] HTTP Kerberos enabled: {self.ozone_http_kerberos_enabled}")
+            print(f"[>] Using protocol: {self.om_protocol}")
+            print(f"[>] Using port: {self.om_port}")
 
             # Minimal required: OM DB dir and Ratis dir
             if not self.om_db_dir:
@@ -453,26 +568,46 @@ class OzoneOMBootstrap:
     
     def download_checkpoint(self) -> bool:
         """Download checkpoint from leader OM"""
-        print("[4.0] Downloading checkpoint from leader OM...")
+        print("[4.1] Downloading checkpoint from leader OM...")
         
         if not self.leader_host:
             print("ERROR: No leader host available", file=sys.stderr)
             return False
         
-        # Determine protocol and port
-        protocol = "https" if self.om_https_port else "http"
-        port = self.om_https_port or self.om_http_port or "9874"
+        # Use the protocol and port determined from configuration
+        protocol = getattr(self, 'om_protocol', 'http')
+        port = getattr(self, 'om_port', '9874')
         
-        # Create temporary directory for download
-        self.temp_dir = tempfile.mkdtemp(prefix="om_bootstrap_")
-        checkpoint_file = os.path.join(self.temp_dir, "om-db-checkpoint.tar")
+        # Create temporary directory on remote host for download with epoch timestamp
+        temp_dir_cmd = f"mktemp -d /tmp/om_bootstrap_{self.epoch_time}_XXXXXX"
+        temp_dir_result = self._run_remote_command(self.follower_host, temp_dir_cmd)
+        
+        if temp_dir_result.returncode != 0:
+            print(f"ERROR: Failed to create temporary directory on remote host: {temp_dir_result.stderr}", file=sys.stderr)
+            return False
+        
+        self.temp_dir = temp_dir_result.stdout.strip()
+        checkpoint_file = f"{self.temp_dir}/om-db-checkpoint.tar"
+        
+        # print(f"[DEBUG] Created temporary directory on remote host: {self.temp_dir}")
         
         # Build curl command
-        curl_cmd = [
-            "curl", "-k", "-vvv",
+        curl_cmd = ["curl", "-k", "-s"]  # Use silent mode instead of verbose
+        
+        # Add Kerberos authentication if enabled
+        if self.ozone_http_kerberos_enabled:
+            if not self.keytab or not self.principal:
+                print("ERROR: HTTP Kerberos is enabled but --keytab and --principal are required", file=sys.stderr)
+                return False
+            
+            # Add negotiate authentication
+            curl_cmd.extend(["--negotiate", "-u", ":"])
+            print(f"[>] Using Kerberos authentication for HTTP request")
+        
+        curl_cmd.extend([
             f"{protocol}://{self.leader_host}:{port}/dbCheckpoint?flushBeforeCheckpoint=true",
             "-o", checkpoint_file
-        ]
+        ])
         
         if self.dry_run:
             print(f"[DRY RUN] Would run: {' '.join(curl_cmd)}")
@@ -485,16 +620,180 @@ class OzoneOMBootstrap:
             print(f"ERROR: Failed to download checkpoint: {result.stderr}", file=sys.stderr)
             return False
         
-        # Verify file was downloaded
+        # Verify file was downloaded and check its content
         ls_cmd = f"ls -la {checkpoint_file}"
         ls_result = self._run_remote_command(self.follower_host, ls_cmd)
         
-        if ls_result.returncode == 0:
-            print(f"[>] Checkpoint downloaded successfully: {ls_result.stdout.strip()}")
-            return True
-        else:
+        if ls_result.returncode != 0:
             print(f"ERROR: Checkpoint file not found after download", file=sys.stderr)
             return False
+        
+        print(f"[>] Checkpoint downloaded: {ls_result.stdout.strip()}")
+        
+        # Check file type and content
+        file_cmd = f"file {checkpoint_file}"
+        file_result = self._run_remote_command(self.follower_host, file_cmd)
+        
+        if file_result.returncode == 0:
+            print(f"[>] File type: {file_result.stdout.strip()}")
+        
+        # Check first few bytes to see if it's a tar file
+        head_cmd = f"head -c 50 {checkpoint_file} | hexdump -C"
+        head_result = self._run_remote_command(self.follower_host, head_cmd)
+        
+        if head_result.returncode == 0:
+            print(f"[>] File header (first 50 bytes):")
+            print(head_result.stdout)
+        
+        # Check if the file contains error messages (common with HTTP errors)
+        grep_cmd = f"grep -i 'error\\|exception\\|failed' {checkpoint_file} | head -5"
+        grep_result = self._run_remote_command(self.follower_host, grep_cmd)
+        
+        if grep_result.returncode == 0 and grep_result.stdout.strip():
+            print(f"WARNING: File contains error messages: {grep_result.stdout.strip()}", file=sys.stderr)
+        
+        # Test if it's a valid tar file
+        tar_test_cmd = f"tar -tf {checkpoint_file} > /dev/null 2>&1"
+        tar_test_result = self._run_remote_command(self.follower_host, tar_test_cmd)
+        
+        if tar_test_result.returncode != 0:
+            print(f"ERROR: Downloaded file is not a valid tar archive", file=sys.stderr)
+            print(f"ERROR: This suggests the checkpoint download failed or returned an error response", file=sys.stderr)
+            
+            return False
+        
+        print(f"[>] Checkpoint file is a valid tar archive")
+        return True
+    
+    def list_last_ratis_log(self, stage: str = "current", host: str = None) -> bool:
+        """List the last Ratis log file from the Ratis log directory"""
+        if not host:
+            host = self.follower_host
+            
+        host_label = "LEADER" if host == self.leader_host else "FOLLOWER"
+        print(f"[{stage.upper()}] Listing last Ratis log file on {host_label} ({host})...")
+        
+        if not self.ratis_dir:
+            print("ERROR: Ratis directory not configured", file=sys.stderr)
+            return False
+        
+        # Find the last log file in the Ratis directory
+        # Handle the structure: /var/lib/hadoop-ozone/om/ratis/{uuid}/current/
+        # Look for log_* files (including log_inprogress_*)
+        find_cmd = f"find {self.ratis_dir} -name 'log_*' -type f -printf '%T@ %p\n' | sort -n | tail -1"
+        find_result = self._run_remote_command(host, find_cmd)
+        
+        if find_result.returncode != 0 or not find_result.stdout.strip():
+            print(f"WARNING: No log_* files found in Ratis directory on {host}: {self.ratis_dir}", file=sys.stderr)
+            return False
+        
+        # Extract the file path (remove timestamp)
+        last_log_file = find_result.stdout.strip().split(' ', 1)[1]
+        
+        # Get file details
+        ls_cmd = f"ls -la {last_log_file}"
+        ls_result = self._run_remote_command(host, ls_cmd)
+        
+        if ls_result.returncode == 0:
+            print(f"[>] {host_label} Ratis log file: {ls_result.stdout.strip()}")
+            
+            # Store the file path for comparison
+            if stage.lower() == "before":
+                if host == self.leader_host:
+                    self.leader_ratis_log_before = last_log_file
+                else:
+                    self.follower_ratis_log_before = last_log_file
+            elif stage.lower() == "after":
+                # Compare with the before log file
+                before_log = None
+                if host == self.leader_host:
+                    before_log = self.leader_ratis_log_before
+                else:
+                    before_log = self.follower_ratis_log_before
+                
+                if before_log and last_log_file != before_log:
+                    print(f"[>] {host_label} Ratis log file changed during bootstrap:")
+                    print(f"    Before: {before_log}")
+                    print(f"    After:  {last_log_file}")
+                elif before_log:
+                    print(f"[>] {host_label} Ratis log file unchanged during bootstrap")
+            
+            return True
+        else:
+                    print(f"ERROR: Failed to get file details on {host}: {ls_result.stderr}", file=sys.stderr)
+        return False
+    
+    def check_snapshots_and_prompt(self) -> bool:
+        """Prompt user to confirm there are no snapshots in the system"""
+        print("\n" + "="*80)
+        print("**SNAPSHOT CONFIRMATION REQUIRED**")
+        print("="*80)
+        print("**WARNING: Bootstrap operation may affect existing snapshots**")
+        print("="*80)
+        print("Before proceeding, please confirm that:")
+        print("1. You have NO snapshots in the Ozone system")
+        print("2. You understand that bootstrap operations may impact snapshots")
+        print("3. You have backed up any important data")
+        print("="*80)
+        print("Type 'NO' (exactly as shown) to continue with the bootstrap operation.")
+        print("Any other input will abort the operation.")
+        print("="*80)
+        
+        try:
+            user_input = input("Enter 'NO' to continue: ").strip()
+            if user_input == "NO":
+                print("[>] User confirmed to proceed with bootstrap operation")
+                return True
+            else:
+                print("[>] User aborted the operation")
+                return False
+        except KeyboardInterrupt:
+            print("\n[>] Operation aborted by user")
+            return False
+    
+    def test_checkpoint_endpoint(self) -> bool:
+        """Test the checkpoint endpoint to ensure it's working"""
+        print("[4.0] Testing checkpoint endpoint...")
+        
+        if not self.leader_host or not self.om_protocol or not self.om_port:
+            print("ERROR: Missing leader host or OM configuration", file=sys.stderr)
+            return False
+        
+        # Test the endpoint with a HEAD request first
+        test_cmd = ["curl", "-k", "-I", "-s"]  # Added -s for silent mode
+        
+        # Add Kerberos authentication if enabled
+        if self.ozone_http_kerberos_enabled:
+            if not self.keytab or not self.principal:
+                print("ERROR: HTTP Kerberos is enabled but --keytab and --principal are required", file=sys.stderr)
+                return False
+            
+            # Add negotiate authentication
+            test_cmd.extend(["--negotiate", "-u", ":"])
+            print(f"[>] Using Kerberos authentication for endpoint test")
+        
+        test_cmd.append(f"{self.om_protocol}://{self.leader_host}:{self.om_port}/dbCheckpoint")
+        test_cmd_str = ' '.join(test_cmd)
+        test_result = self._run_remote_command(self.follower_host, test_cmd_str)
+        
+        if test_result.returncode != 0:
+            print(f"ERROR: Checkpoint endpoint test failed: {test_result.stderr}", file=sys.stderr)
+            return False
+        
+        # Extract just the HTTP status line
+        lines = test_result.stdout.strip().split('\n')
+        status_line = None
+        for line in lines:
+            if line.startswith('HTTP/'):
+                status_line = line.strip()
+                break
+        
+        if status_line:
+            print(f"[>] Checkpoint endpoint test successful: {status_line}")
+        else:
+            print(f"[>] Checkpoint endpoint test successful")
+        
+        return True
     
     def extract_checkpoint(self) -> bool:
         """Extract checkpoint to temporary directory"""
@@ -504,8 +803,8 @@ class OzoneOMBootstrap:
             print("ERROR: Missing OM DB directory or temp directory", file=sys.stderr)
             return False
         
-        checkpoint_file = os.path.join(self.temp_dir, "om-db-checkpoint.tar")
-        extract_dir = f"{self.om_db_dir}.tmp"
+        checkpoint_file = f"{self.temp_dir}/om-db-checkpoint.tar"
+        extract_dir = f"{self.om_db_dir}.tmp_{self.epoch_time}"
         
         # Create temporary directory
         mkdir_cmd = f"mkdir -p {extract_dir}"
@@ -526,6 +825,8 @@ class OzoneOMBootstrap:
         
         if tar_result.returncode != 0:
             print(f"ERROR: Failed to extract checkpoint: {tar_result.stderr}", file=sys.stderr)
+            print(f"ERROR: This usually means the downloaded file is not a valid tar archive", file=sys.stderr)
+            print(f"ERROR: Please check the download step output above for more details", file=sys.stderr)
             return False
         
         print(f"[>] Checkpoint extracted to {extract_dir}")
@@ -549,7 +850,7 @@ class OzoneOMBootstrap:
         
         # Backup current database
         current_db = f"{self.om_db_dir}/om.db"
-        backup_db = f"{self.backup_dir}/om.db.backup.$(date +%Y%m%d_%H%M%S)"
+        backup_db = f"{self.backup_dir}/om.db.backup.{self.epoch_time}"
         backup_current_cmd = f"cp -r {current_db} {backup_db}"
         
         if self.dry_run:
@@ -560,8 +861,8 @@ class OzoneOMBootstrap:
                 print(f"ERROR: Failed to backup current database: {backup_current_result.stderr}", file=sys.stderr)
                 return False
         
-        # Move current database to backup
-        move_current_cmd = f"mv {current_db} {current_db}.backup"
+        # Move current database to backup with epoch timestamp
+        move_current_cmd = f"mv {current_db} {current_db}.backup.{self.epoch_time}"
         
         if self.dry_run:
             print(f"[DRY RUN] Would run: {move_current_cmd}")
@@ -572,7 +873,7 @@ class OzoneOMBootstrap:
                 return False
         
         # Move new checkpoint into place
-        new_db = f"{self.om_db_dir}.tmp"
+        new_db = f"{self.om_db_dir}.tmp_{self.epoch_time}"
         move_new_cmd = f"mv {new_db} {current_db}"
         
         if self.dry_run:
@@ -615,8 +916,8 @@ class OzoneOMBootstrap:
         current_dir = find_result.stdout.strip()
         group_dir = os.path.dirname(current_dir)
         
-        # Create backup directories
-        backup_ratis_cmd = f"mkdir -p {self.backup_dir}/ratisLogs {self.backup_dir}/ratisLogs/original"
+        # Create backup directories with epoch timestamp
+        backup_ratis_cmd = f"mkdir -p {self.backup_dir}/ratisLogs_{self.epoch_time} {self.backup_dir}/ratisLogs_{self.epoch_time}/original"
         backup_ratis_result = self._run_remote_command(self.follower_host, backup_ratis_cmd)
         
         if backup_ratis_result.returncode != 0:
@@ -624,7 +925,7 @@ class OzoneOMBootstrap:
             return False
         
         # Backup current Raft logs
-        backup_logs_cmd = f"cp {current_dir}/log* {self.backup_dir}/ratisLogs/ 2>/dev/null || true"
+        backup_logs_cmd = f"cp {current_dir}/log* {self.backup_dir}/ratisLogs_{self.epoch_time}/ 2>/dev/null || true"
         
         if self.dry_run:
             print(f"[DRY RUN] Would run: {backup_logs_cmd}")
@@ -634,7 +935,7 @@ class OzoneOMBootstrap:
                 print(f"WARNING: Failed to backup Ratis logs: {backup_logs_result.stderr}", file=sys.stderr)
         
         # Move original logs to safe location
-        move_logs_cmd = f"mv {current_dir}/log* {self.backup_dir}/ratisLogs/original/ 2>/dev/null || true"
+        move_logs_cmd = f"mv {current_dir}/log* {self.backup_dir}/ratisLogs_{self.epoch_time}/original/ 2>/dev/null || true"
         
         if self.dry_run:
             print(f"[DRY RUN] Would run: {move_logs_cmd}")
@@ -643,7 +944,7 @@ class OzoneOMBootstrap:
             if move_logs_result.returncode != 0:
                 print(f"WARNING: Failed to move Ratis logs: {move_logs_result.stderr}", file=sys.stderr)
         
-        print(f"[>] Ratis logs backed up to {self.backup_dir}/ratisLogs")
+        print(f"[>] Ratis logs backed up to {self.backup_dir}/ratisLogs_{self.epoch_time}")
         return True
     
     def start_follower(self) -> bool:
@@ -669,10 +970,31 @@ class OzoneOMBootstrap:
             )
             print(f"[>] Start command initiated: {result}")
             
-            # Wait for the role to start
-            time.sleep(60)
-            print(f"[>] Follower OM started successfully")
-            return True
+            # Wait for the process to start by checking for the OzoneManagerStarter process
+            print(f"[>] Waiting for OzoneManagerStarter process to start...")
+            max_wait_time = 180  # 3 minutes max wait
+            wait_interval = 10   # Check every 10 seconds
+            elapsed_time = 0
+            
+            while elapsed_time < max_wait_time:
+                # Check if the OzoneManagerStarter process is running
+                check_cmd = f"pgrep -f 'org.apache.hadoop.ozone.om.OzoneManagerStarter'"
+                check_result = self._run_remote_command(self.follower_host, check_cmd)
+                
+                if check_result.returncode == 0:
+                    # Process found, it has started
+                    print(f"[>] OzoneManagerStarter process started successfully (after {elapsed_time} seconds)")
+                    self.om_role_was_stopped = False
+                    return True
+                
+                # Process not running yet, wait and check again
+                time.sleep(wait_interval)
+                elapsed_time += wait_interval
+                print(f"[>] Process not running yet, waiting... ({elapsed_time}/{max_wait_time} seconds)")
+            
+            # If we reach here, the process didn't start within the timeout
+            print(f"ERROR: OzoneManagerStarter process did not start within {max_wait_time} seconds", file=sys.stderr)
+            return False
             
         except Exception as e:
             print(f"ERROR: Failed to start follower OM: {e}", file=sys.stderr)
@@ -713,7 +1035,7 @@ class OzoneOMBootstrap:
         if node_result.returncode == 0:
             # Parse the output to find the node ID for our follower
             output = node_result.stdout
-            print(f"[DEBUG] getserviceroles output:\n{output}")
+            # print(f"[DEBUG] getserviceroles output:\n{output}")
             
             # Look for our follower host in the output and extract its node ID
             node_id = None
@@ -771,10 +1093,15 @@ class OzoneOMBootstrap:
     
     def cleanup(self):
         """Clean up temporary files"""
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            import shutil
-            shutil.rmtree(self.temp_dir)
-            print(f"[>] Cleaned up temporary directory: {self.temp_dir}")
+        if self.temp_dir:
+            # Clean up remote temporary directory
+            cleanup_cmd = f"rm -rf {self.temp_dir}"
+            cleanup_result = self._run_remote_command(self.follower_host, cleanup_cmd)
+            
+            if cleanup_result.returncode == 0:
+                print(f"[>] Cleaned up remote temporary directory: {self.temp_dir}")
+            else:
+                print(f"WARNING: Failed to clean up remote temporary directory {self.temp_dir}: {cleanup_result.stderr}")
     
     def _run_remote_command(self, host: str, command: str) -> subprocess.CompletedProcess:
         """Run a command on a remote host via SSH"""
@@ -840,7 +1167,7 @@ class OzoneOMBootstrap:
     
     def check_security_configuration(self) -> bool:
         """Check if Ozone security is enabled and validate Kerberos credentials if needed"""
-        print("[1.1] Checking Ozone security configuration...")
+        print("[1.2] Checking Ozone security configuration...")
         
         if not self.ozone_service:
             print("ERROR: Ozone service not discovered yet", file=sys.stderr)
@@ -865,6 +1192,16 @@ class OzoneOMBootstrap:
                 # Check if keytab and principal are provided
                 if not self.keytab or not self.principal:
                     print("ERROR: Ozone security is enabled but Kerberos credentials are missing", file=sys.stderr)
+                    print("Please provide --keytab and --principal options", file=sys.stderr)
+                    return False
+            
+            # Check HTTP Kerberos configuration (this is separate from ozone.security.enabled)
+            if self.ozone_http_kerberos_enabled:
+                print("[>] HTTP Kerberos authentication required for checkpoint download")
+                
+                # Check if keytab and principal are provided
+                if not self.keytab or not self.principal:
+                    print("ERROR: HTTP Kerberos is enabled but Kerberos credentials are missing", file=sys.stderr)
                     print("Please provide --keytab and --principal options", file=sys.stderr)
                     return False
                 
@@ -912,7 +1249,7 @@ class OzoneOMBootstrap:
             print("OZONE MANAGER BOOTSTRAP AUTOMATION")
             print("=" * 80)
             
-            # Step 1: Find healthy leader
+            # Step 1.0: Find healthy leader
             if not self.discover_cluster_info():
                 return False
             
@@ -920,43 +1257,97 @@ class OzoneOMBootstrap:
             if not self.check_security_configuration():
                 return False
             
+            # Step 1.2: Prompt user to confirm no snapshots exist
+            if not self.check_snapshots_and_prompt():
+                return False
+            
+            # Step 1.3: Get OM roles from CLI
             if not self.get_om_roles_from_cli():
                 return False
             
-            if not self.verify_leader_health():
-                return False
-            
-            # Step 2: Stop follower
-            if not self.stop_follower():
-                return False
-            
-            # Step 3: Get configuration
+            # Step 1.4: Get configuration (after we have the follower role identified)
             if not self.get_om_configuration():
                 return False
             
-            # Step 4: Download checkpoint
+            # Step 2.0: Check OM leader health
+            if not self.verify_leader_health():
+                return False
+            
+            # Step 2.1: List last Ratis log files before bootstrapping
+            print("[2.1] Listing Ratis log files before bootstrapping...")
+            
+            # Debug: Check if leader and follower are the same
+            if self.leader_host == self.follower_host:
+                print(f"[DEBUG] Leader and follower are the same host: {self.leader_host}")
+                # Only list once if they're the same
+                if not self.list_last_ratis_log("before", self.leader_host):
+                    print("WARNING: Failed to list Ratis log file before bootstrapping", file=sys.stderr)
+            else:
+                # List leader Ratis log
+                if not self.list_last_ratis_log("before", self.leader_host):
+                    print("WARNING: Failed to list leader Ratis log file before bootstrapping", file=sys.stderr)
+                
+                # List follower Ratis log
+                if not self.list_last_ratis_log("before", self.follower_host):
+                    print("WARNING: Failed to list follower Ratis log file before bootstrapping", file=sys.stderr)
+            
+            # Step 3.0: Stop follower
+            if not self.stop_follower():
+                return False
+            
+            # Step 4.0: Test checkpoint endpoint
+            if not self.test_checkpoint_endpoint():
+                return False
+            
+            # Step 4.1: Download checkpoint
             if not self.download_checkpoint():
                 return False
             
-            # Step 5: Extract checkpoint
+            # Step 4.2: Extract checkpoint
             if not self.extract_checkpoint():
                 return False
             
-            # Step 6: Backup and replace database
+            # Step 5.0: Backup and replace database
             if not self.backup_and_replace_database():
                 return False
             
-            # Step 7: Backup Ratis logs
+            # Step 5.1: Backup Ratis logs
             if not self.backup_ratis_logs():
                 return False
             
-            # Step 8: Start follower
+            # Step 6.0: Start follower
             if not self.start_follower():
                 return False
             
-            # Step 9: Verify status
+            # Step 7.0: Verify status
             if not self.verify_om_status():
                 return False
+            
+            # Step 7.1: List last Ratis log files after bootstrapping
+            print("[7.1] Listing Ratis log files after bootstrapping...")
+            
+            # Debug: Check if leader and follower are the same
+            if self.leader_host == self.follower_host:
+                print(f"[DEBUG] Leader and follower are the same host: {self.leader_host}")
+                # Only list once if they're the same
+                if not self.list_last_ratis_log("after", self.leader_host):
+                    print("WARNING: Failed to list Ratis log file after bootstrapping", file=sys.stderr)
+            else:
+                # List leader Ratis log
+                if not self.list_last_ratis_log("after", self.leader_host):
+                    print("WARNING: Failed to list leader Ratis log file after bootstrapping", file=sys.stderr)
+                
+                # List follower Ratis log
+                if not self.list_last_ratis_log("after", self.follower_host):
+                    print("WARNING: Failed to list follower Ratis log file after bootstrapping", file=sys.stderr)
+            
+            # Step 8.0: Restart OM role if it was stopped during bootstrap
+            if self.om_role_was_stopped:
+                print("[8.0] Restarting OM role that was stopped during bootstrap...")
+                if not self.start_follower():
+                    print("WARNING: Failed to restart OM role", file=sys.stderr)
+                else:
+                    print("[>] OM role restarted successfully")
             
             print("=" * 80)
             print("BOOTSTRAP PROCESS COMPLETED SUCCESSFULLY")

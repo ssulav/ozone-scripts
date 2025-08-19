@@ -6,15 +6,23 @@ This script automates the process of bootstrapping an unhealthy Ozone Manager fo
 
 The script performs the following steps:
 
-1. **Find a healthy leader**: Discovers the Ozone service and identifies a healthy leader OM
-2. **Stop unhealthy follower**: Stops the target follower OM via Cloudera Manager
-3. **Locate OM directories**: Identifies OM database and Ratis directories from configuration
-4. **Download checkpoint**: Downloads the latest consistent checkpoint from the leader OM
-5. **Extract checkpoint**: Extracts the checkpoint to a temporary directory
-6. **Backup and replace database**: Backs up the current database and replaces it with the checkpoint
-7. **Backup Ratis logs**: Backs up existing Ratis logs to prevent conflicts
-8. **Start OM**: Starts the follower OM via Cloudera Manager
-9. **Verify status**: Verifies the OM is healthy and tests leadership transfer
+1. **Find healthy leader** (1.0): Discovers the Ozone service and identifies a healthy leader OM
+2. **Get configuration** (1.1): Retrieves OM database and Ratis directories from configuration
+3. **Check security configuration** (1.2): Validates Kerberos credentials if security is enabled
+4. **Check for snapshots** (1.3): Prompts user to confirm no snapshots exist before proceeding
+5. **Get OM roles from CLI** (2.0): Retrieves current OM roles and identifies leader/follower status
+6. **Check OM leader health** (2.1): Verifies the leader OM is healthy and performs leader switch if needed
+7. **List Ratis log files before bootstrapping** (2.2): Captures Ratis log state on both leader and follower
+8. **Stop follower** (3.0): Stops the target follower OM via Cloudera Manager
+9. **Test checkpoint endpoint** (4.0): Validates the checkpoint download endpoint is accessible
+10. **Download checkpoint** (4.1): Downloads the latest consistent checkpoint from the leader OM
+11. **Extract checkpoint** (4.2): Extracts the checkpoint to a temporary directory
+12. **Backup and replace database** (5.0): Backs up the current database and replaces it with the checkpoint
+13. **Backup Ratis logs** (5.1): Backs up existing Ratis logs to prevent conflicts
+14. **Start follower** (6.0): Starts the follower OM via Cloudera Manager
+15. **Verify status** (7.0): Verifies the OM is healthy and tests leadership transfer
+16. **List Ratis log files after bootstrapping** (7.1): Captures Ratis log state after bootstrapping for comparison
+17. **Restart OM role** (8.0): Restarts the OM role if it was stopped during the process
 
 ## Prerequisites
 
@@ -142,41 +150,64 @@ OZONE MANAGER BOOTSTRAP AUTOMATION
 [1.0] Discovering Ozone service information...
 [>] Ozone service: OZONE-1
 [>] Found 3 OM roles
-[1.1] Getting OM roles from ozone admin command...
+[1.1] Getting OM configuration...
+[>] OM DB directory: /var/lib/hadoop-ozone/om/data5
+[>] Ratis directory: /var/lib/hadoop-ozone/om/ratis5
+[>] HTTP Kerberos enabled: false
+[1.2] Checking security configuration...
+[>] Ozone security enabled: false
+[1.3] Prompting user to confirm no snapshots exist...
+
+================================================================================
+**SNAPSHOT CONFIRMATION REQUIRED**
+================================================================================
+**WARNING: Bootstrap operation may affect existing snapshots**
+================================================================================
+Before proceeding, please confirm that:
+1. You have NO snapshots in the Ozone system
+2. You understand that bootstrap operations may impact snapshots
+3. You have backed up any important data
+================================================================================
+Type 'NO' (exactly as shown) to continue with the bootstrap operation.
+Any other input will abort the operation.
+================================================================================
+Enter 'NO' to continue: NO
+[>] User confirmed to proceed with bootstrap operation
+[2.0] Getting OM roles from CLI...
 [>] OM roles output:
 LEADER: om-1.prod.example.com
 FOLLOWER: om-2.prod.example.com
 FOLLOWER: om-3.prod.example.com
 [>] Leader OM: om-1.prod.example.com
-[>] Follower OMs: ['om-2.prod.example.com', 'om-3.prod.example.com']
 [>] Target follower: om-2.prod.example.com
-[1.2] Verifying leader OM health...
+[2.1] Checking OM leader health...
 [>] Using leader: om-1.prod.example.com
-[2.0] Stopping follower OM on om-2.prod.example.com...
+[2.2] Listing last Ratis log files before bootstrapping...
+[>] LEADER (om-1.prod.example.com): Last log file: log_inprogress_82838
+[>] FOLLOWER (om-2.prod.example.com): Last log file: log_inprogress_73046
+[3.0] Stopping follower OM on om-2.prod.example.com...
 [>] Stop command initiated: {...}
 [>] Follower OM stopped successfully
-[3.0] Getting OM configuration...
-[>] OM DB directory: /var/lib/hadoop-ozone/om/data5
-[>] Ratis directory: /var/lib/hadoop-ozone/om/ratis5
-[>] OM HTTP port: 9874
-[>] OM HTTPS port: 9875
-[4.0] Downloading checkpoint from leader OM...
-[>] Checkpoint downloaded successfully: -rw-r--r-- 1 hdfs hdfs 1048576 Jan 15 10:30 /tmp/om_bootstrap_abc123/om-db-checkpoint.tar
-[5.0] Extracting checkpoint...
-[>] Checkpoint extracted to /var/lib/hadoop-ozone/om/data5.tmp
-[6.0] Backing up and replacing OM database...
+[4.0] Testing checkpoint endpoint...
+[>] Checkpoint endpoint accessible: HTTP/1.1 200 OK
+[4.1] Downloading checkpoint from leader OM...
+[>] Checkpoint downloaded successfully: -rw-r--r-- 1 hdfs hdfs 1048576 Jan 15 10:30 /tmp/om_bootstrap_1703123456_abc123/om-db-checkpoint.tar
+[4.2] Extracting checkpoint...
+[>] Checkpoint extracted to /var/lib/hadoop-ozone/om/data5.tmp_1703123456
+[5.0] Backing up and replacing OM database...
 [>] Database replaced successfully
-[7.0] Backing up Ratis logs...
-[>] Ratis logs backed up to /backup/ratisLogs
-[8.0] Starting follower OM on om-2.prod.example.com...
+[5.1] Backing up Ratis logs...
+[>] Ratis logs backed up to /backup/om_bootstrap_1703123456/ratisLogs_1703123456
+[6.0] Starting follower OM on om-2.prod.example.com...
 [>] Start command initiated: {...}
 [>] Follower OM started successfully
-[9.0] Verifying OM status...
+[7.0] Verifying OM status...
 [>] Follower om-2.prod.example.com is healthy
-[9.1] Testing leadership transfer...
-[>] Testing leadership transfer to node ID: om-2.prod.example.com
-[>] Leadership transfer test successful
-[>] Leadership transfer test completed, om-2.prod.example.com is follower
+[7.1] Listing last Ratis log files after bootstrapping...
+[>] LEADER (om-1.prod.example.com): Last log file: log_inprogress_82838 (unchanged)
+[>] FOLLOWER (om-2.prod.example.com): Last log file: log_inprogress_82838 (changed)
+[8.0] Restarting OM role if it was stopped during bootstrap...
+[>] OM role was stopped during bootstrap, ensuring it's started
 ================================================================================
 BOOTSTRAP PROCESS COMPLETED SUCCESSFULLY
 ================================================================================
@@ -196,11 +227,20 @@ The script includes comprehensive error handling:
 
 ## Backup Locations
 
-The script creates backups in the following locations:
+The script creates backups in the following locations with unique epoch timestamps:
 
-- **OM Database**: `/backup/om.db.backup.YYYYMMDD_HHMMSS`
-- **Ratis Logs**: `/backup/ratisLogs/` and `/backup/ratisLogs/original/`
-- **Original Database**: `{om_db_dir}/om.db.backup`
+- **Backup Directory**: `/backup/om_bootstrap_{epoch_timestamp}/`
+- **OM Database**: `/backup/om_bootstrap_{epoch_timestamp}/om.db.backup.{epoch_timestamp}`
+- **Current Database Backup**: `{om_db_dir}/om.db.backup.{epoch_timestamp}`
+- **Ratis Logs**: `/backup/om_bootstrap_{epoch_timestamp}/ratisLogs_{epoch_timestamp}/`
+- **Original Ratis Logs**: `/backup/om_bootstrap_{epoch_timestamp}/ratisLogs_{epoch_timestamp}/original/`
+- **Temporary Directories**: `/tmp/om_bootstrap_{epoch_timestamp}_XXXXXX/`
+- **Extract Directory**: `{om_db_dir}.tmp_{epoch_timestamp}`
+
+**Example with epoch timestamp 1703123456:**
+- Backup directory: `/backup/om_bootstrap_1703123456/`
+- Database backup: `/backup/om_bootstrap_1703123456/om.db.backup.1703123456`
+- Ratis logs: `/backup/om_bootstrap_1703123456/ratisLogs_1703123456/`
 
 ## Troubleshooting
 
@@ -246,6 +286,43 @@ For issues or questions:
 2. Review Cloudera Manager and Ozone logs
 3. Verify all prerequisites are met
 4. Test with `--dry-run` first to identify potential issues
+
+## Snapshot Confirmation
+
+The script includes a critical safety check for snapshots before proceeding with bootstrap operations:
+
+### Why Snapshot Check is Important
+Bootstrap operations may affect existing snapshots in the Ozone system. The script prompts users to confirm they have no snapshots before proceeding.
+
+### Snapshot Confirmation Process
+1. **User Prompt**: The script displays a prominent warning about snapshot impact
+2. **Confirmation Required**: Users must type "NO" exactly to continue
+3. **Clear Instructions**: The prompt explains what users need to confirm
+4. **Safety First**: Any other input or Ctrl+C aborts the operation
+
+### Example Snapshot Confirmation
+```
+================================================================================
+**SNAPSHOT CONFIRMATION REQUIRED**
+================================================================================
+**WARNING: Bootstrap operation may affect existing snapshots**
+================================================================================
+Before proceeding, please confirm that:
+1. You have NO snapshots in the Ozone system
+2. You understand that bootstrap operations may impact snapshots
+3. You have backed up any important data
+================================================================================
+Type 'NO' (exactly as shown) to continue with the bootstrap operation.
+Any other input will abort the operation.
+================================================================================
+Enter 'NO' to continue: 
+```
+
+### Best Practices
+- **Check for Snapshots**: Manually verify no snapshots exist before running bootstrap
+- **Backup Important Data**: Ensure critical data is backed up before proceeding
+- **Test in Non-Production**: Always test bootstrap operations in non-production environments first
+- **Document Snapshots**: Keep records of any snapshots that might be affected
 
 ## Security Configuration
 
