@@ -38,7 +38,7 @@ The script performs the following steps:
 9. Verify OM status and leadership transfer
 
 Usage:
-    python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \
+    ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \
         --follower-host <follower-hostname> --insecure --yes
 
 Requirements:
@@ -73,12 +73,45 @@ _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
 from common.cm_client import CmClient
 
 
-# Module logger
+# Module logger and logging setup
 logger = logging.getLogger("ozone.om.bootstrap")
 
+_LOG_TS: Optional[str] = None
+_CONSOLE_HANDLER: Optional[logging.Handler] = None
+_FILE_HANDLER: Optional[logging.Handler] = None
+
 def _configure_logging() -> None:
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    """Configure logging with one console handler and one file handler at
+    logs/ozone_om_bootstrap_YYYYMMDD_HHMMSS.log.
+    """
+    global _LOG_TS, _CONSOLE_HANDLER, _FILE_HANDLER
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        return
+
+    logs_dir = Path(_SCRIPT_DIR) / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    if _LOG_TS is None:
+        _LOG_TS = time.strftime("%Y%m%d_%H%M%S")
+
+    main_log_file = logs_dir / f"ozone_om_bootstrap_{_LOG_TS}.log"
+
+    root_logger.setLevel(logging.INFO)
+
+    console_formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    file_formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    # Console (stream) handler
+    _CONSOLE_HANDLER = logging.StreamHandler()
+    _CONSOLE_HANDLER.setFormatter(console_formatter)
+
+    # Main file handler
+    _FILE_HANDLER = logging.FileHandler(str(main_log_file))
+    _FILE_HANDLER.setFormatter(file_formatter)
+
+    root_logger.addHandler(_CONSOLE_HANDLER)
+    root_logger.addHandler(_FILE_HANDLER)
 
 
 class OzoneOMBootstrap:
@@ -86,7 +119,8 @@ class OzoneOMBootstrap:
     
     def __init__(self, cm_client: CmClient, cluster_name: str, follower_host: str, 
                  insecure: bool = False, dry_run: bool = False, keytab: str = None, principal: str = None,
-                 ssh_user: str = None, sudo_user: str = None):
+                 ssh_user: str = None, sudo_user: str = None,
+                 enable_leadership_transfer_test: bool = False):
         self.cm_client = cm_client
         self.cluster_name = cluster_name
         self.follower_host = follower_host
@@ -133,17 +167,20 @@ class OzoneOMBootstrap:
         # SSH and sudo configuration
         self.ssh_user = ssh_user
         self.sudo_user = sudo_user
+        
+        # Behavior flags
+        self.enable_leadership_transfer_test = enable_leadership_transfer_test
     
     def validate_ssh_connectivity(self) -> bool:
         """Validate SSH connectivity to CM host and all OM role nodes"""
-        logger.info("[SSH VALIDATION] Validating SSH connectivity...")
+        logger.info("[1.1] [SSH VALIDATION] Validating SSH connectivity...")
         
         # Get CM host from base URL
         try:
             cm_host = self.cm_client.base_url.split("://")[1].split(":")[0]
             logger.info(f"[>] CM host: {cm_host}")
         except Exception as e:
-            logger.error(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
+            logger.error(f"Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
             return False
         
         # Collect all hosts to validate
@@ -164,7 +201,7 @@ class OzoneOMBootstrap:
         # Validate SSH connectivity to each host
         for host in hosts_to_validate:
             if not self._test_ssh_connection(host):
-                logger.error(f"ERROR: SSH connection failed to {host}")
+                logger.error(f"SSH connection failed to {host}")
                 return False
             logger.info(f"[>] SSH connection to {host}: OK")
         
@@ -192,51 +229,51 @@ class OzoneOMBootstrap:
     
     def validate_sudo_access(self) -> bool:
         """Validate sudo access and determine sudo user if needed"""
-        print("[SUDO VALIDATION] Validating sudo access...")
+        logger.info("[SUDO VALIDATION] Validating sudo access...")
         
         # Skip sudo validation if SSH user is root
         if self.ssh_user == "root":
-            print("[>] SSH user is root, skipping sudo validation")
+            logger.info("[>] SSH user is root, skipping sudo validation")
             return True
         
         # Get CM host for sudo validation
         try:
             cm_host = self.cm_client.base_url.split("://")[1].split(":")[0]
         except Exception as e:
-            print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+            logger.error(f"Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
             return False
         
         # Test sudo access on CM host
         if not self._test_sudo_access(cm_host):
-            print(f"WARNING: Sudo access failed on {cm_host}", file=sys.stderr)
+            logger.warning(f"Sudo access failed on {cm_host}")
             
             # Ask user for sudo user if not provided
             if not self.sudo_user:
-                print("\n" + "="*60)
-                print("SUDO ACCESS REQUIRED")
-                print("="*60)
-                print("Sudo access is required to run commands on the remote hosts.")
-                print("Please provide a sudo-enabled user account.")
-                print("="*60)
+                logger.info("\n" + "="*60)
+                logger.info("SUDO ACCESS REQUIRED")
+                logger.info("="*60)
+                logger.info("Sudo access is required to run commands on the remote hosts.")
+                logger.info("Please provide a sudo-enabled user account.")
+                logger.info("="*60)
                 
                 try:
                     sudo_user_input = input("Enter sudo user (or press Enter to abort): ").strip()
                     if sudo_user_input:
                         self.sudo_user = sudo_user_input
-                        print(f"[>] Using sudo user: {self.sudo_user}")
+                        logger.info(f"[>] Using sudo user: {self.sudo_user}")
                     else:
-                        print("[>] Aborting due to no sudo user provided")
+                        logger.info("[>] Aborting due to no sudo user provided")
                         return False
                 except KeyboardInterrupt:
-                    print("\n[>] Operation aborted by user")
+                    logger.info("\n[>] Operation aborted by user")
                     return False
             
             # Test sudo access with the provided user
             if not self._test_sudo_access_with_user(cm_host, self.sudo_user):
-                print(f"ERROR: Sudo access failed with user {self.sudo_user} on {cm_host}", file=sys.stderr)
+                logger.error(f"Sudo access failed with user {self.sudo_user} on {cm_host}")
                 return False
         
-        print(f"[>] Sudo access validated successfully")
+        logger.info(f"[>] Sudo access validated successfully")
         return True
     
     def _test_sudo_access(self, host: str) -> bool:
@@ -275,7 +312,7 @@ class OzoneOMBootstrap:
         
     def discover_cluster_info(self) -> bool:
         """Discover Ozone service and OM roles information"""
-        print("[1.0] Discovering Ozone service information...")
+        logger.info("[1.0] Discovering Ozone service information...")
         
         # First, validate that the cluster exists
         try:
@@ -291,15 +328,15 @@ class OzoneOMBootstrap:
                     break
             
             if not cluster_exists:
-                print(f"ERROR: Cluster '{self.cluster_name}' not found in Cloudera Manager", file=sys.stderr)
-                print("Available clusters:", file=sys.stderr)
+                logger.error(f"Cluster '{self.cluster_name}' not found in Cloudera Manager")
+                logger.info("Available clusters:")
                 for cluster_name in available_clusters:
-                    print(f"  - '{cluster_name}'", file=sys.stderr)
-                print("\nUse the exact cluster name from the list above.", file=sys.stderr)
+                    logger.info(f"  - '{cluster_name}'")
+                logger.info("\nUse the exact cluster name from the list above.")
                 return False
                 
         except Exception as e:
-            print(f"ERROR: Failed to connect to Cloudera Manager: {e}", file=sys.stderr)
+            logger.error(f"Failed to connect to Cloudera Manager: {e}")
             return False
         
         # Find Ozone service
@@ -307,32 +344,32 @@ class OzoneOMBootstrap:
         ozone_services = [s for s in services if s.get("type") == "OZONE"]
         
         if not ozone_services:
-            print("ERROR: No Ozone service found in cluster", file=sys.stderr)
-            print("Available services:", file=sys.stderr)
+            logger.error("No Ozone service found in cluster")
+            logger.info("Available services:")
             for service in services:
                 service_name = service.get('name', 'Unknown')
                 service_type = service.get('type', 'Unknown')
-                print(f"  - {service_name} ({service_type})", file=sys.stderr)
+                logger.info(f"  - {service_name} ({service_type})")
             return False
             
         self.ozone_service = ozone_services[0]["name"]
-        print(f"[>] Ozone service: {self.ozone_service}")
+        logger.info(f"[>] Ozone service: {self.ozone_service}")
         
         # Get OM roles
         roles = self.cm_client.list_roles(self.cluster_name, self.ozone_service)
         om_roles = [r for r in roles if r.get("type") == "OZONE_MANAGER"]
         
         if not om_roles:
-            print("ERROR: No Ozone Manager roles found", file=sys.stderr)
-            print("Available roles:", file=sys.stderr)
+            logger.error("No Ozone Manager roles found")
+            logger.info("Available roles:")
             for role in roles:
                 role_name = role.get('name', 'Unknown')
                 role_type = role.get('type', 'Unknown')
-                print(f"  - {role_name} ({role_type})", file=sys.stderr)
+                logger.info(f"  - {role_name} ({role_type})")
             return False
             
         self.om_roles = om_roles
-        print(f"[>] Found {len(om_roles)} OM roles")
+        logger.info(f"[>] Found {len(om_roles)} OM roles")
         
         # Get service ID
         try:
@@ -352,23 +389,23 @@ class OzoneOMBootstrap:
                     pass
                 
             if not self.service_id:
-                print("WARNING: Could not determine service ID from CM config", file=sys.stderr)
-                print("Will try to discover service ID from ozone command output", file=sys.stderr)
+                logger.warning("Could not determine service ID from CM config")
+                logger.info("Will try to discover service ID from ozone command output")
         except Exception as e:
-            print(f"WARNING: Could not get service config: {e}", file=sys.stderr)
+            logger.warning(f"Could not get service config: {e}")
             
         return True
     
     def get_om_roles_from_cli(self) -> bool:
         """Get OM roles using ozone admin command"""
-        print("[1.3] Getting OM roles from ozone admin command...")
+        logger.info("[1.3] Getting OM roles from ozone admin command...")
         
         # Use the CM host from cm-base-url
         try:
             command_host = self.cm_client.base_url.split("://")[1].split(":")[0]
-            print(f"[>] Using CM host for ozone commands: {command_host}")
+            logger.info(f"[>] Using CM host for ozone commands: {command_host}")
         except Exception as e:
-            print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+            logger.error(f"Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
             return False
         
         # Run ozone admin om roles command
@@ -376,27 +413,27 @@ class OzoneOMBootstrap:
             cmd = f"ozone admin om roles -id={self.service_id}"
         else:
             # Try to get service ID first
-            print("WARNING: No service ID available, trying to discover it...", file=sys.stderr)
+            logger.warning("No service ID available, trying to discover it...")
             service_id_cmd = "ozone getconf -confKey ozone.service.id"
             service_id_result = self._run_remote_command(command_host, service_id_cmd)
             
             if service_id_result.returncode == 0 and service_id_result.stdout.strip():
                 self.service_id = service_id_result.stdout.strip()
-                print(f"[>] Discovered service ID: {self.service_id}")
+                logger.info(f"[>] Discovered service ID: {self.service_id}")
                 cmd = f"ozone admin om roles -id={self.service_id}"
             else:
-                print("ERROR: Could not discover service ID, cannot proceed", file=sys.stderr)
+                logger.error("Could not discover service ID, cannot proceed")
                 return False
         
         result = self._run_remote_command(command_host, cmd)
         
         if result.returncode != 0:
-            print(f"ERROR: Failed to get OM roles: {result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to get OM roles: {result.stderr}")
             return False
         
         # Parse roles output
         roles_output = result.stdout
-        print(f"[>] OM roles output:\n{roles_output}")
+        logger.info(f"[>] OM roles output:\n{roles_output}")
         
         # Parse leader and followers - handle both formats
         # Format 1: LEADER: hostname
@@ -408,12 +445,12 @@ class OzoneOMBootstrap:
             if leader_match:
                 self.leader_host = leader_match.group(2)  # hostname is in group 2
             else:
-                print("WARNING: Could not parse leader from roles output", file=sys.stderr)
+                logger.warning("Could not parse leader from roles output")
         else:
             self.leader_host = leader_match.group(1)
         
         if self.leader_host:
-            print(f"[>] Leader OM: {self.leader_host}")
+            logger.info(f"[>] Leader OM: {self.leader_host}")
         
         # Parse followers - handle both formats
         follower_matches = re.findall(r'FOLLOWER:\s*([^\s]+)', roles_output)
@@ -425,9 +462,9 @@ class OzoneOMBootstrap:
                 follower_matches = [match[1] for match in follower_matches]
         
         if follower_matches:
-            print(f"[>] Follower OMs: {follower_matches}")
+            logger.info(f"[>] Follower OMs: {follower_matches}")
             if self.follower_host in follower_matches:
-                print(f"[>] Target follower: {self.follower_host}")
+                logger.info(f"[>] Target follower: {self.follower_host}")
                 
                 # Find the follower role from CM roles
                 for role in self.om_roles:
@@ -436,34 +473,34 @@ class OzoneOMBootstrap:
                         host_info = self.cm_client.get_host_by_id(host_id)
                         if host_info.get("hostname") == self.follower_host:
                             self.follower_role = role
-                            print(f"[>] Identified follower role: {role.get('name')}")
+                            logger.info(f"[>] Identified follower role: {role.get('name')}")
                             break
                 
                 if not self.follower_role:
-                    print(f"WARNING: Could not identify follower role for {self.follower_host}", file=sys.stderr)
+                    logger.warning(f"Could not identify follower role for {self.follower_host}")
             else:
-                print(f"WARNING: Target follower {self.follower_host} not found in follower list", file=sys.stderr)
+                logger.warning(f"Target follower {self.follower_host} not found in follower list")
                 return False
         
         return True
     
     def verify_leader_health(self) -> bool:
         """Verify the leader OM is healthy and perform leader switch if needed"""
-        print("[1.3] Verifying leader OM health...")
+        logger.info("[2.0] Verifying leader OM health...")
         
         if not self.leader_host:
-            print("ERROR: No leader host identified", file=sys.stderr)
+            logger.error("No leader host identified")
             return False
         
         # Check if leader is healthy by running a simple command
         if not self.service_id:
-            print("ERROR: Service ID required for health check", file=sys.stderr)
+            logger.error("Service ID required for health check")
             return False
         health_cmd = f"ozone admin om getserviceroles --service-id={self.service_id}"
         result = self._run_remote_command(self.leader_host, health_cmd)
         
         if result.returncode != 0:
-            print(f"WARNING: Leader {self.leader_host} appears unhealthy, attempting leader switch...", file=sys.stderr)
+            logger.warning(f"Leader {self.leader_host} appears unhealthy, attempting leader switch...")
             
             # Find a healthy follower to switch to
             for role in self.om_roles:
@@ -476,7 +513,7 @@ class OzoneOMBootstrap:
                         # Test if this host is healthy
                         test_result = self._run_remote_command(candidate_host, health_cmd)
                         if test_result.returncode == 0:
-                            print(f"[>] Switching leadership to healthy follower: {candidate_host}")
+                            logger.info(f"[>] Switching leadership to healthy follower: {candidate_host}")
                             
                             # Get node ID for transfer
                             node_id_cmd = f"ozone admin om getserviceroles --service-id={self.service_id}"
@@ -507,25 +544,24 @@ class OzoneOMBootstrap:
                                             break
                                 
                                 if not node_id:
-                                    print(f"WARNING: Could not extract node ID for candidate {candidate_host}", file=sys.stderr)
+                                    logger.warning(f"Could not extract node ID for candidate {candidate_host}")
                                     continue
                                 transfer_cmd = f"ozone admin om transfer -id={self.service_id} -n {node_id}"
                                 transfer_result = self._run_remote_command(candidate_host, transfer_cmd)
                                 
                                 if transfer_result.returncode == 0:
                                     self.leader_host = candidate_host
-                                    print(f"[>] Successfully switched leadership to {candidate_host}")
+                                    logger.info(f"[>] Successfully switched leadership to {candidate_host}")
                                     time.sleep(30)  # Wait for leadership transfer to complete
                                     break
                                 else:
-                                    print(f"WARNING: Failed to transfer leadership: {transfer_result.stderr}", file=sys.stderr)
+                                    logger.warning(f"Failed to transfer leadership: {transfer_result.stderr}")
         
-        print(f"[>] Using leader: {self.leader_host}")
+        logger.info(f"[>] Using leader: {self.leader_host}")
         return True
     
     def stop_follower(self) -> bool:
         """Stop the target follower OM"""
-        print(f"[2.0] Stopping follower OM on {self.follower_host}...")
         
         # Find the role name for the follower
         follower_role_name = None
@@ -539,11 +575,11 @@ class OzoneOMBootstrap:
                     break
         
         if not follower_role_name:
-            print(f"ERROR: Could not find role name for follower {self.follower_host}", file=sys.stderr)
+            logger.error(f"Could not find role name for follower {self.follower_host}")
             return False
         
         if self.dry_run:
-            print(f"[DRY RUN] Would stop role: {follower_role_name}")
+            logger.info(f"[DRY RUN] Would stop role: {follower_role_name}")
             return True
         
         try:
@@ -553,10 +589,10 @@ class OzoneOMBootstrap:
                 "stop", 
                 [follower_role_name]
             )
-            print(f"[>] Stop command initiated: {result}")
+            logger.info(f"[>] Stop command initiated: {result}")
             
             # Wait for the process to stop by checking for the OzoneManagerStarter process
-            print(f"[>] Waiting for OzoneManagerStarter process to stop...")
+            logger.info(f"[>] Waiting for OzoneManagerStarter process to stop...")
             max_wait_time = 120  # 2 minutes max wait
             wait_interval = 5    # Check every 5 seconds
             elapsed_time = 0
@@ -568,28 +604,28 @@ class OzoneOMBootstrap:
                 
                 if check_result.returncode != 0:
                     # Process not found, it has stopped
-                    print(f"[>] OzoneManagerStarter process stopped successfully (after {elapsed_time} seconds)")
+                    logger.info(f"[>] OzoneManagerStarter process stopped successfully (after {elapsed_time} seconds)")
                     self.om_role_was_stopped = True
                     return True
                 
                 # Process still running, wait and check again
                 time.sleep(wait_interval)
                 elapsed_time += wait_interval
-                print(f"[>] Process still running, waiting... ({elapsed_time}/{max_wait_time} seconds)")
+                logger.info(f"[>] Process still running, waiting... ({elapsed_time}/{max_wait_time} seconds)")
             
             # If we reach here, the process didn't stop within the timeout
-            print(f"WARNING: OzoneManagerStarter process did not stop within {max_wait_time} seconds", file=sys.stderr)
+            logger.warning(f"OzoneManagerStarter process did not stop within {max_wait_time} seconds")
             # print(f"[>] Proceeding anyway, assuming process will stop soon...")
             self.om_role_was_stopped = False
             return False
             
         except Exception as e:
-            print(f"ERROR: Failed to stop follower OM: {e}", file=sys.stderr)
+            logger.error(f"Failed to stop follower OM: {e}")
             return False
     
     def get_om_configuration(self) -> bool:
         """Get OM configuration including database and ratis directories"""
-        print("[1.4] Getting OM configuration...")
+        logger.info("[1.4] Getting OM configuration...")
 
         def _extract_value(item: Dict[str, Any]) -> Optional[str]:
             return (
@@ -622,12 +658,12 @@ class OzoneOMBootstrap:
 
             # 2) Read from specific follower role configuration (for DB and Ratis dirs)
             if not self.follower_role:
-                print("ERROR: Follower role not identified yet", file=sys.stderr)
+                logger.error("Follower role not identified yet")
                 return False
             
             follower_role_name = self.follower_role.get("name")
             if not follower_role_name:
-                print("ERROR: Follower role name not found", file=sys.stderr)
+                logger.error("Follower role name not found")
                 return False
             
             # Get configuration for the specific follower role
@@ -637,11 +673,11 @@ class OzoneOMBootstrap:
             
             # If role-specific config is empty, fall back to role config group
             if not role_items:
-                print(f"[>] No role-specific config found for {follower_role_name}, using role config group...")
+                logger.info(f"[>] No role-specific config found for {follower_role_name}, using role config group...")
                 groups = self.cm_client.list_role_config_groups(self.cluster_name, self.ozone_service)
                 om_groups = [g for g in groups if (g.get("roleType") or g.get("roleTypeName") or "").upper() == "OZONE_MANAGER"]
                 if not om_groups:
-                    print("ERROR: No OZONE_MANAGER role config groups found", file=sys.stderr)
+                    logger.error("No OZONE_MANAGER role config groups found")
                     return False
 
                 # Prefer the BASE group if present
@@ -660,7 +696,7 @@ class OzoneOMBootstrap:
                 role_items = group_cfg.get("items", [])
                 # print(f"[DEBUG] Role group config has {len(role_items)} items")
             else:
-                print(f"[>] Using role-specific configuration for {follower_role_name}")
+                logger.info(f"[>] Using role-specific configuration for {follower_role_name}")
 
             # Parse role-level keys
             ssl_enabled = False
@@ -721,31 +757,31 @@ class OzoneOMBootstrap:
                 # print(f"[DEBUG] No ports found, using default: {self.om_protocol}://host:{self.om_port}")
 
             # 5) Validate and log results
-            print(f"[>] OM DB directory: {self.om_db_dir}")
-            print(f"[>] Ratis directory: {self.ratis_dir}")
-            print(f"[>] HTTP Kerberos enabled: {self.ozone_http_kerberos_enabled}")
-            print(f"[>] Using protocol: {self.om_protocol}")
-            print(f"[>] Using port: {self.om_port}")
+            logger.info(f"[>] OM DB directory: {self.om_db_dir}")
+            logger.info(f"[>] Ratis directory: {self.ratis_dir}")
+            logger.info(f"[>] HTTP Kerberos enabled: {self.ozone_http_kerberos_enabled}")
+            logger.info(f"[>] Using protocol: {self.om_protocol}")
+            logger.info(f"[>] Using port: {self.om_port}")
 
             # Minimal required: OM DB dir and Ratis dir
             if not self.om_db_dir:
-                print("ERROR: Could not determine 'ozone.om.db.dirs' from global configs", file=sys.stderr)
+                logger.error("Could not determine 'ozone.om.db.dirs' from global configs")
                 return False
             if not self.ratis_dir:
-                print("WARNING: Could not determine 'ozone.om.ratis.storage.dir' from global configs", file=sys.stderr)
+                logger.warning("Could not determine 'ozone.om.ratis.storage.dir' from global configs")
 
             return True
 
         except Exception as e:
-            print(f"ERROR: Failed to get OM configuration: {e}", file=sys.stderr)
+            logger.error(f"Failed to get OM configuration: {e}")
             return False
     
     def download_checkpoint(self) -> bool:
         """Download checkpoint from leader OM"""
-        print("[4.1] Downloading checkpoint from leader OM...")
+        logger.info("[4.1] Downloading checkpoint from leader OM...")
         
         if not self.leader_host:
-            print("ERROR: No leader host available", file=sys.stderr)
+            logger.error("No leader host available")
             return False
         
         # Use the protocol and port determined from configuration
@@ -757,7 +793,7 @@ class OzoneOMBootstrap:
         temp_dir_result = self._run_remote_command(self.follower_host, temp_dir_cmd)
         
         if temp_dir_result.returncode != 0:
-            print(f"ERROR: Failed to create temporary directory on remote host: {temp_dir_result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to create temporary directory on remote host: {temp_dir_result.stderr}")
             return False
         
         self.temp_dir = temp_dir_result.stdout.strip()
@@ -771,12 +807,12 @@ class OzoneOMBootstrap:
         # Add Kerberos authentication if enabled
         if self.ozone_http_kerberos_enabled:
             if not self.keytab or not self.principal:
-                print("ERROR: HTTP Kerberos is enabled but --keytab and --principal are required", file=sys.stderr)
+                logger.error("HTTP Kerberos is enabled but --keytab and --principal are required")
                 return False
             
             # Add negotiate authentication
             curl_cmd.extend(["--negotiate", "-u", ":"])
-            print(f"[>] Using Kerberos authentication for HTTP request")
+            logger.info(f"[>] Using Kerberos authentication for HTTP request")
         
         curl_cmd.extend([
             f"{protocol}://{self.leader_host}:{port}/dbCheckpoint?flushBeforeCheckpoint=true",
@@ -784,14 +820,14 @@ class OzoneOMBootstrap:
         ])
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {' '.join(curl_cmd)}")
+            logger.info(f"[DRY RUN] Would run: {' '.join(curl_cmd)}")
             return True
         
         # Run curl command on follower host
         result = self._run_remote_command(self.follower_host, ' '.join(curl_cmd))
         
         if result.returncode != 0:
-            print(f"ERROR: Failed to download checkpoint: {result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to download checkpoint: {result.stderr}")
             return False
         
         # Verify file was downloaded and check its content
@@ -799,44 +835,43 @@ class OzoneOMBootstrap:
         ls_result = self._run_remote_command(self.follower_host, ls_cmd)
         
         if ls_result.returncode != 0:
-            print(f"ERROR: Checkpoint file not found after download", file=sys.stderr)
+            logger.error(f"Checkpoint file not found after download")
             return False
         
-        print(f"[>] Checkpoint downloaded: {ls_result.stdout.strip()}")
+        logger.info(f"[>] Checkpoint downloaded: {ls_result.stdout.strip()}")
         
         # Check file type and content
         file_cmd = f"file {checkpoint_file}"
         file_result = self._run_remote_command(self.follower_host, file_cmd)
         
         if file_result.returncode == 0:
-            print(f"[>] File type: {file_result.stdout.strip()}")
+            logger.info(f"[>] File type: {file_result.stdout.strip()}")
         
         # Check first few bytes to see if it's a tar file
-        head_cmd = f"head -c 50 {checkpoint_file} | hexdump -C"
+        head_cmd = f"head -c 32 {checkpoint_file} | hexdump -C"
         head_result = self._run_remote_command(self.follower_host, head_cmd)
         
         if head_result.returncode == 0:
-            print(f"[>] File header (first 50 bytes):")
-            print(head_result.stdout)
+            logger.info(f"[>] File header (first 32 bytes):\n{head_result.stdout}")
         
         # Check if the file contains error messages (common with HTTP errors)
         grep_cmd = f"grep -i 'error\\|exception\\|failed' {checkpoint_file} | head -5"
         grep_result = self._run_remote_command(self.follower_host, grep_cmd)
         
         if grep_result.returncode == 0 and grep_result.stdout.strip():
-            print(f"WARNING: File contains error messages: {grep_result.stdout.strip()}", file=sys.stderr)
+            logger.warning(f"File contains error messages: {grep_result.stdout.strip()}")
         
         # Test if it's a valid tar file
         tar_test_cmd = f"tar -tf {checkpoint_file} > /dev/null 2>&1"
         tar_test_result = self._run_remote_command(self.follower_host, tar_test_cmd)
         
         if tar_test_result.returncode != 0:
-            print(f"ERROR: Downloaded file is not a valid tar archive", file=sys.stderr)
-            print(f"ERROR: This suggests the checkpoint download failed or returned an error response", file=sys.stderr)
+            logger.error(f"Downloaded file is not a valid tar archive")
+            logger.error(f"This suggests the checkpoint download failed or returned an error response")
             
             return False
         
-        print(f"[>] Checkpoint file is a valid tar archive")
+        logger.info(f"[>] Checkpoint file is a valid tar archive")
         return True
     
     def list_last_ratis_log(self, stage: str = "current", host: str = None) -> bool:
@@ -845,10 +880,10 @@ class OzoneOMBootstrap:
             host = self.follower_host
             
         host_label = "LEADER" if host == self.leader_host else "FOLLOWER"
-        print(f"[{stage.upper()}] Listing last Ratis log file on {host_label} ({host})...")
+        logger.info(f"[{stage.upper()}] Listing last Ratis log file on {host_label} ({host})...")
         
         if not self.ratis_dir:
-            print("ERROR: Ratis directory not configured", file=sys.stderr)
+            logger.error("Ratis directory not configured")
             return False
         
         # Find the last log file in the Ratis directory
@@ -858,7 +893,7 @@ class OzoneOMBootstrap:
         find_result = self._run_remote_command(host, find_cmd)
         
         if find_result.returncode != 0 or not find_result.stdout.strip():
-            print(f"WARNING: No log_* files found in Ratis directory on {host}: {self.ratis_dir}", file=sys.stderr)
+            logger.warning(f"No log_* files found in Ratis directory on {host}: {self.ratis_dir}")
             return False
         
         # Extract the file path (remove timestamp)
@@ -869,7 +904,7 @@ class OzoneOMBootstrap:
         ls_result = self._run_remote_command(host, ls_cmd)
         
         if ls_result.returncode == 0:
-            print(f"[>] {host_label} Ratis log file: {ls_result.stdout.strip()}")
+            logger.info(f"[>] {host_label} Ratis log file: {ls_result.stdout.strip()}")
             
             # Store the file path for comparison
             if stage.lower() == "before":
@@ -886,21 +921,22 @@ class OzoneOMBootstrap:
                     before_log = self.follower_ratis_log_before
                 
                 if before_log and last_log_file != before_log:
-                    print(f"[>] {host_label} Ratis log file changed during bootstrap:")
-                    print(f"    Before: {before_log}")
-                    print(f"    After:  {last_log_file}")
+                    logger.info(f"[>] {host_label} Ratis log file changed during bootstrap:")
+                    logger.info(f"    Before: {before_log}")
+                    logger.info(f"    After:  {last_log_file}")
                 elif before_log:
-                    print(f"[>] {host_label} Ratis log file unchanged during bootstrap")
+                    logger.info(f"[>] {host_label} Ratis log file unchanged during bootstrap")
             
             return True
         else:
-                    print(f"ERROR: Failed to get file details on {host}: {ls_result.stderr}", file=sys.stderr)
+                    logger.error(f"Failed to get file details on {host}: {ls_result.stderr}")
         return False
     
     def check_snapshots_and_prompt(self) -> bool:
         """Prompt user to confirm there are no snapshots in the system"""
+        # Print snapshot confirmation to console without logger metadata
         print("\n" + "="*80)
-        print("**SNAPSHOT CONFIRMATION REQUIRED**")
+        print("** [1.2] SNAPSHOT CONFIRMATION REQUIRED **")
         print("="*80)
         print("** STOP! Do not proceed if the cluster enables Ozone Snapshot.\n"
               "Contact Cloudera Storage Engineering team for further instructions if that is the case. **")
@@ -917,21 +953,21 @@ class OzoneOMBootstrap:
         try:
             user_input = input("Enter 'Continue' to proceed: ").strip()
             if user_input == "Continue":
-                print("[>] User confirmed to proceed with bootstrap operation")
+                logger.info("[>] User confirmed to proceed with bootstrap operation")
                 return True
             else:
-                print("[>] User aborted the operation")
+                logger.info("[>] User aborted the operation")
                 return False
         except KeyboardInterrupt:
-            print("\n[>] Operation aborted by user")
+            logger.info("\n[>] Operation aborted by user")
             return False
     
     def test_checkpoint_endpoint(self) -> bool:
         """Test the checkpoint endpoint to ensure it's working"""
-        print("[4.0] Testing checkpoint endpoint...")
+        logger.info("[4.0] Testing checkpoint endpoint...")
         
         if not self.leader_host or not self.om_protocol or not self.om_port:
-            print("ERROR: Missing leader host or OM configuration", file=sys.stderr)
+            logger.error("Missing leader host or OM configuration")
             return False
         
         # Test the endpoint with a HEAD request first
@@ -940,19 +976,19 @@ class OzoneOMBootstrap:
         # Add Kerberos authentication if enabled
         if self.ozone_http_kerberos_enabled:
             if not self.keytab or not self.principal:
-                print("ERROR: HTTP Kerberos is enabled but --keytab and --principal are required", file=sys.stderr)
+                logger.error("HTTP Kerberos is enabled but --keytab and --principal are required")
                 return False
             
             # Add negotiate authentication
             test_cmd.extend(["--negotiate", "-u", ":"])
-            print(f"[>] Using Kerberos authentication for endpoint test")
+            logger.info(f"[>] Using Kerberos authentication for endpoint test")
         
         test_cmd.append(f"{self.om_protocol}://{self.leader_host}:{self.om_port}/dbCheckpoint")
         test_cmd_str = ' '.join(test_cmd)
         test_result = self._run_remote_command(self.follower_host, test_cmd_str)
         
         if test_result.returncode != 0:
-            print(f"ERROR: Checkpoint endpoint test failed: {test_result.stderr}", file=sys.stderr)
+            logger.error(f"Checkpoint endpoint test failed: {test_result.stderr}")
             return False
         
         # Extract just the HTTP status line
@@ -964,18 +1000,18 @@ class OzoneOMBootstrap:
                 break
         
         if status_line:
-            print(f"[>] Checkpoint endpoint test successful: {status_line}")
+            logger.info(f"[>] Checkpoint endpoint test successful: {status_line}")
         else:
-            print(f"[>] Checkpoint endpoint test successful")
+            logger.info(f"[>] Checkpoint endpoint test successful")
         
         return True
     
     def extract_checkpoint(self) -> bool:
         """Extract checkpoint to temporary directory"""
-        print("[5.0] Extracting checkpoint...")
+        logger.info("[4.2] Extracting checkpoint...")
         
         if not self.om_db_dir or not self.temp_dir:
-            print("ERROR: Missing OM DB directory or temp directory", file=sys.stderr)
+            logger.error("Missing OM DB directory or temp directory")
             return False
         
         checkpoint_file = f"{self.temp_dir}/om-db-checkpoint.tar"
@@ -986,33 +1022,33 @@ class OzoneOMBootstrap:
         mkdir_result = self._run_remote_command(self.follower_host, mkdir_cmd)
         
         if mkdir_result.returncode != 0:
-            print(f"ERROR: Failed to create extract directory: {mkdir_result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to create extract directory: {mkdir_result.stderr}")
             return False
         
         # Extract checkpoint
         tar_cmd = f"tar -xvf {checkpoint_file} -C {extract_dir}"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {tar_cmd}")
+            logger.info(f"[DRY RUN] Would run: {tar_cmd}")
             return True
         
         tar_result = self._run_remote_command(self.follower_host, tar_cmd)
         
         if tar_result.returncode != 0:
-            print(f"ERROR: Failed to extract checkpoint: {tar_result.stderr}", file=sys.stderr)
-            print(f"ERROR: This usually means the downloaded file is not a valid tar archive", file=sys.stderr)
-            print(f"ERROR: Please check the download step output above for more details", file=sys.stderr)
+            logger.error(f"Failed to extract checkpoint: {tar_result.stderr}")
+            logger.error(f"This usually means the downloaded file is not a valid tar archive")
+            logger.error(f"Please check the download step output above for more details")
             return False
         
-        print(f"[>] Checkpoint extracted to {extract_dir}")
+        logger.info(f"[>] Checkpoint extracted to {extract_dir}")
         return True
     
     def backup_and_replace_database(self) -> bool:
         """Backup current database and replace with checkpoint"""
-        print("[6.0] Backing up and replacing OM database...")
+        logger.info("[5.0] Backing up and replacing OM database...")
         
         if not self.om_db_dir:
-            print("ERROR: OM DB directory not configured", file=sys.stderr)
+            logger.error("OM DB directory not configured")
             return False
         
         # Create backup directory
@@ -1020,7 +1056,7 @@ class OzoneOMBootstrap:
         backup_result = self._run_remote_command(self.follower_host, backup_cmd)
         
         if backup_result.returncode != 0:
-            print(f"ERROR: Failed to create backup directory: {backup_result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to create backup directory: {backup_result.stderr}")
             return False
         
         # Backup current database
@@ -1029,22 +1065,22 @@ class OzoneOMBootstrap:
         backup_current_cmd = f"cp -r {current_db} {backup_db}"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {backup_current_cmd}")
+            logger.info(f"[DRY RUN] Would run: {backup_current_cmd}")
         else:
             backup_current_result = self._run_remote_command(self.follower_host, backup_current_cmd)
             if backup_current_result.returncode != 0:
-                print(f"ERROR: Failed to backup current database: {backup_current_result.stderr}", file=sys.stderr)
+                logger.error(f"Failed to backup current database: {backup_current_result.stderr}")
                 return False
         
         # Move current database to backup with epoch timestamp
         move_current_cmd = f"mv {current_db} {current_db}.backup.{self.epoch_time}"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {move_current_cmd}")
+            logger.info(f"[DRY RUN] Would run: {move_current_cmd}")
         else:
             move_current_result = self._run_remote_command(self.follower_host, move_current_cmd)
             if move_current_result.returncode != 0:
-                print(f"ERROR: Failed to move current database: {move_current_result.stderr}", file=sys.stderr)
+                logger.error(f"Failed to move current database: {move_current_result.stderr}")
                 return False
         
         # Move new checkpoint into place
@@ -1052,32 +1088,32 @@ class OzoneOMBootstrap:
         move_new_cmd = f"mv {new_db} {current_db}"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {move_new_cmd}")
+            logger.info(f"[DRY RUN] Would run: {move_new_cmd}")
         else:
             move_new_result = self._run_remote_command(self.follower_host, move_new_cmd)
             if move_new_result.returncode != 0:
-                print(f"ERROR: Failed to move new database: {move_new_result.stderr}", file=sys.stderr)
+                logger.error(f"Failed to move new database: {move_new_result.stderr}")
                 return False
         
         # Set correct ownership
         chown_cmd = f"chown -R hdfs:hdfs {current_db}"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {chown_cmd}")
+            logger.info(f"[DRY RUN] Would run: {chown_cmd}")
         else:
             chown_result = self._run_remote_command(self.follower_host, chown_cmd)
             if chown_result.returncode != 0:
-                print(f"WARNING: Failed to set ownership: {chown_result.stderr}", file=sys.stderr)
+                logger.warning(f"Failed to set ownership: {chown_result.stderr}")
         
-        print(f"[>] Database replaced successfully")
+        logger.info(f"[>] Database replaced successfully")
         return True
     
     def backup_ratis_logs(self) -> bool:
         """Backup Ratis logs"""
-        print("[7.0] Backing up Ratis logs...")
+        logger.info("[5.1] Backing up Ratis logs...")
         
         if not self.ratis_dir:
-            print("WARNING: Ratis directory not configured, skipping Ratis log backup", file=sys.stderr)
+            logger.warning("Ratis directory not configured, skipping Ratis log backup")
             return True
         
         # Find the Raft group directory
@@ -1085,7 +1121,7 @@ class OzoneOMBootstrap:
         find_result = self._run_remote_command(self.follower_host, find_group_cmd)
         
         if find_result.returncode != 0 or not find_result.stdout.strip():
-            print(f"WARNING: Could not find Ratis current directory", file=sys.stderr)
+            logger.warning(f"Could not find Ratis current directory")
             return True
         
         current_dir = find_result.stdout.strip()
@@ -1096,44 +1132,44 @@ class OzoneOMBootstrap:
         backup_ratis_result = self._run_remote_command(self.follower_host, backup_ratis_cmd)
         
         if backup_ratis_result.returncode != 0:
-            print(f"ERROR: Failed to create Ratis backup directories: {backup_ratis_result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to create Ratis backup directories: {backup_ratis_result.stderr}")
             return False
         
         # Backup current Raft logs
         backup_logs_cmd = f"cp {current_dir}/log* {self.backup_dir}/ratisLogs_{self.epoch_time}/ 2>/dev/null || true"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {backup_logs_cmd}")
+            logger.info(f"[DRY RUN] Would run: {backup_logs_cmd}")
         else:
             backup_logs_result = self._run_remote_command(self.follower_host, backup_logs_cmd)
             if backup_logs_result.returncode != 0:
-                print(f"WARNING: Failed to backup Ratis logs: {backup_logs_result.stderr}", file=sys.stderr)
+                logger.warning(f"Failed to backup Ratis logs: {backup_logs_result.stderr}")
         
         # Move original logs to safe location
         move_logs_cmd = f"mv {current_dir}/log* {self.backup_dir}/ratisLogs_{self.epoch_time}/original/ 2>/dev/null || true"
         
         if self.dry_run:
-            print(f"[DRY RUN] Would run: {move_logs_cmd}")
+            logger.info(f"[DRY RUN] Would run: {move_logs_cmd}")
         else:
             move_logs_result = self._run_remote_command(self.follower_host, move_logs_cmd)
             if move_logs_result.returncode != 0:
-                print(f"WARNING: Failed to move Ratis logs: {move_logs_result.stderr}", file=sys.stderr)
+                logger.warning(f"Failed to move Ratis logs: {move_logs_result.stderr}")
         
-        print(f"[>] Ratis logs backed up to {self.backup_dir}/ratisLogs_{self.epoch_time}")
+        logger.info(f"[>] Ratis logs backed up to {self.backup_dir}/ratisLogs_{self.epoch_time}")
         return True
     
     def start_follower(self) -> bool:
         """Start the follower OM"""
-        print(f"[8.0] Starting follower OM on {self.follower_host}...")
+        # logger.info(f"[7.2] Starting follower OM on {self.follower_host}...")
         
         if not self.follower_role:
-            print("ERROR: Follower role not identified", file=sys.stderr)
+            logger.error("Follower role not identified")
             return False
         
         role_name = self.follower_role.get("name")
         
         if self.dry_run:
-            print(f"[DRY RUN] Would start role: {role_name}")
+            logger.info(f"[DRY RUN] Would start role: {role_name}")
             return True
         
         try:
@@ -1143,10 +1179,10 @@ class OzoneOMBootstrap:
                 "start", 
                 [role_name]
             )
-            print(f"[>] Start command initiated: {result}")
+            logger.info(f"[>] Start command initiated: {result}")
             
             # Wait for the process to start by checking for the OzoneManagerStarter process
-            print(f"[>] Waiting for OzoneManagerStarter process to start...")
+            logger.info(f"[>] Waiting for OzoneManagerStarter process to start...")
             max_wait_time = 180  # 3 minutes max wait
             wait_interval = 10   # Check every 10 seconds
             elapsed_time = 0
@@ -1158,50 +1194,39 @@ class OzoneOMBootstrap:
                 
                 if check_result.returncode == 0:
                     # Process found, it has started
-                    print(f"[>] OzoneManagerStarter process started successfully (after {elapsed_time} seconds)")
+                    logger.info(f"[>] OzoneManagerStarter process started successfully (after {elapsed_time} seconds)")
                     self.om_role_was_stopped = False
                     return True
                 
                 # Process not running yet, wait and check again
                 time.sleep(wait_interval)
                 elapsed_time += wait_interval
-                print(f"[>] Process not running yet, waiting... ({elapsed_time}/{max_wait_time} seconds)")
+                logger.info(f"[>] Process not running yet, waiting... ({elapsed_time}/{max_wait_time} seconds)")
             
             # If we reach here, the process didn't start within the timeout
-            print(f"ERROR: OzoneManagerStarter process did not start within {max_wait_time} seconds", file=sys.stderr)
+            logger.error(f"OzoneManagerStarter process did not start within {max_wait_time} seconds")
             return False
             
         except Exception as e:
-            print(f"ERROR: Failed to start follower OM: {e}", file=sys.stderr)
+            logger.error(f"Failed to start follower OM: {e}")
             return False
     
     def verify_om_status(self) -> bool:
         """Verify OM status and test leadership transfer"""
-        print("[9.0] Verifying OM status...")
+        logger.info("[7.0] Verifying OM status...")
         
         # Wait a bit more for OM to fully join the cluster
         time.sleep(30)
         
         # Get updated roles
         if not self._get_om_roles_from_cli():
-            print("ERROR: Failed to get updated OM roles", file=sys.stderr)
+            logger.error("Failed to get updated OM roles")
             return False
-        
-        # Check if our follower is now healthy
-        if not self.service_id:
-            print("ERROR: Service ID required for health check", file=sys.stderr)
-            return False
-        health_cmd = f"ozone admin om getserviceroles --service-id={self.service_id}"
-        result = self._run_remote_command(self.follower_host, health_cmd)
-        
-        if result.returncode != 0:
-            print(f"WARNING: Follower {self.follower_host} still appears unhealthy", file=sys.stderr)
-            return False
-        
-        print(f"[>] Follower {self.follower_host} is healthy")
-        
+        return True
+
+    def test_leadership_transfer(self) -> bool:
         # Test leadership transfer
-        print("[9.1] Testing leadership transfer...")
+        logger.info("[8.0] Testing leadership transfer...")
         
         # Get node ID for the bootstrapped follower
         node_id_cmd = f"ozone admin om getserviceroles --service-id={self.service_id}"
@@ -1210,7 +1235,7 @@ class OzoneOMBootstrap:
         if node_result.returncode == 0:
             # Parse the output to find the node ID for our follower
             output = node_result.stdout
-            # print(f"[DEBUG] getserviceroles output:\n{output}")
+            logger.info(f"OM roles output:\n{output}")
             
             # Look for our follower host in the output and extract its node ID
             node_id = None
@@ -1235,13 +1260,13 @@ class OzoneOMBootstrap:
                         break
             
             if node_id:
-                print(f"[>] Testing leadership transfer to node ID: {node_id}")
+                logger.info(f"[>] Testing leadership transfer to node ID: {node_id}")
             else:
-                print(f"ERROR: Could not extract node ID for follower {self.follower_host}", file=sys.stderr)
-                print(f"Available lines: {lines}", file=sys.stderr)
+                logger.error(f"Could not extract node ID for follower {self.follower_host}")
+                logger.info(f"Available lines: {lines}")
                 return False
         else:
-            print(f"ERROR: Failed to get service roles: {node_result.stderr}", file=sys.stderr)
+            logger.error(f"Failed to get service roles: {node_result.stderr}")
             return False
         
         # Now proceed with the transfer
@@ -1249,7 +1274,7 @@ class OzoneOMBootstrap:
         transfer_result = self._run_remote_command(self.follower_host, transfer_cmd)
         
         if transfer_result.returncode == 0:
-            print(f"[>] Leadership transfer test successful")
+            logger.info(f"[>] Leadership transfer test successful")
             
             # Wait for transfer to complete
             time.sleep(30)
@@ -1257,13 +1282,12 @@ class OzoneOMBootstrap:
             # Verify the transfer
             if self._get_om_roles_from_cli():
                 if self.leader_host == self.follower_host:
-                    print(f"[>] Leadership transfer confirmed: {self.follower_host} is now leader")
+                    logger.info(f"[>] Leadership transfer confirmed: {self.follower_host} is now leader")
                 else:
-                    print(f"[>] Leadership transfer test completed, {self.follower_host} is follower")
-            
+                    logger.info(f"[>] Leadership transfer test completed, {self.follower_host} is follower")
             return True
         else:
-            print(f"WARNING: Leadership transfer test failed: {transfer_result.stderr}", file=sys.stderr)
+            logger.warning(f"Leadership transfer test failed: {transfer_result.stderr}")
             return False
     
     def cleanup(self):
@@ -1274,9 +1298,9 @@ class OzoneOMBootstrap:
             cleanup_result = self._run_remote_command(self.follower_host, cleanup_cmd)
             
             if cleanup_result.returncode == 0:
-                print(f"[>] Cleaned up remote temporary directory: {self.temp_dir}")
+                logger.info(f"[>] Cleaned up remote temporary directory: {self.temp_dir}")
             else:
-                print(f"WARNING: Failed to clean up remote temporary directory {self.temp_dir}: {cleanup_result.stderr}")
+                logger.warning(f"Failed to clean up remote temporary directory {self.temp_dir}: {cleanup_result.stderr}")
     
     def _run_remote_command(self, host: str, command: str, use_sudo: bool = False) -> subprocess.CompletedProcess:
         """Run a command on a remote host via SSH"""
@@ -1323,9 +1347,9 @@ class OzoneOMBootstrap:
         # Use the CM host from cm-base-url
         try:
             command_host = self.cm_client.base_url.split("://")[1].split(":")[0]
-            print(f"[>] Using CM host for ozone commands: {command_host}")
+            logger.info(f"[>] Using CM host for ozone commands: {command_host}")
         except Exception as e:
-            print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+            logger.error(f"Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
             return False
         
         # Run ozone admin om roles command
@@ -1354,10 +1378,10 @@ class OzoneOMBootstrap:
     
     def check_security_configuration(self) -> bool:
         """Check if Ozone security is enabled and validate Kerberos credentials if needed"""
-        print("[1.5] Checking Ozone security configuration...")
+        logger.info("[1.5] Checking Ozone security configuration...")
         
         if not self.ozone_service:
-            print("ERROR: Ozone service not discovered yet", file=sys.stderr)
+            logger.error("Ozone service not discovered yet")
             return False
         
         try:
@@ -1370,33 +1394,33 @@ class OzoneOMBootstrap:
                 if item.get("name") == "ozone.security.enabled":
                     security_enabled = item.get("value", "false").lower() == "true"
                     self.ozone_security_enabled = security_enabled
-                    print(f"[>] Ozone security enabled: {security_enabled}")
+                    logger.info(f"[>] Ozone security enabled: {security_enabled}")
                     break
             
             if self.ozone_security_enabled:
-                print("[>] Kerberos authentication required for Ozone operations")
+                logger.info("[>] Kerberos authentication required for Ozone operations")
                 
                 # Check if keytab and principal are provided
                 if not self.keytab or not self.principal:
-                    print("ERROR: Ozone security is enabled but Kerberos credentials are missing", file=sys.stderr)
-                    print("Please provide --keytab and --principal options", file=sys.stderr)
+                    logger.error("Ozone security is enabled but Kerberos credentials are missing")
+                    logger.info("Please provide --keytab and --principal options")
                     return False
             
             # Check HTTP Kerberos configuration (this is separate from ozone.security.enabled)
             if self.ozone_http_kerberos_enabled:
-                print("[>] HTTP Kerberos authentication required for checkpoint download")
+                logger.info("[>] HTTP Kerberos authentication required for checkpoint download")
                 
                 # Check if keytab and principal are provided
                 if not self.keytab or not self.principal:
-                    print("ERROR: HTTP Kerberos is enabled but Kerberos credentials are missing", file=sys.stderr)
-                    print("Please provide --keytab and --principal options", file=sys.stderr)
+                    logger.error("HTTP Kerberos is enabled but Kerberos credentials are missing")
+                    logger.info("Please provide --keytab and --principal options")
                     return False
                 
                 # Use CM host for keytab validation since ozone commands run there
                 try:
                     cm_host = self.cm_client.base_url.split("://")[1].split(":")[0]
                 except Exception as e:
-                    print(f"ERROR: Failed to extract CM host from URL {self.cm_client.base_url}: {e}", file=sys.stderr)
+                    logger.error(f"Failed to extract CM host from URL {self.cm_client.base_url}: {e}")
                     return False
                 
                 # Validate keytab file exists on CM host
@@ -1404,11 +1428,11 @@ class OzoneOMBootstrap:
                 result = self._run_remote_command(cm_host, keytab_check_cmd)
                 
                 if result.returncode != 0 or 'NOT_FOUND' in result.stdout:
-                    print(f"ERROR: Keytab file not found on CM host {cm_host}: {self.keytab}", file=sys.stderr)
+                    logger.error(f"Keytab file not found on CM host {cm_host}: {self.keytab}")
                     return False
                 
-                print(f"[>] Using keytab: {self.keytab}")
-                print(f"[>] Using principal: {self.principal}")
+                logger.info(f"[>] Using keytab: {self.keytab}")
+                logger.info(f"[>] Using principal: {self.principal}")
                 
                 # Test kinit on CM host
                 if not self.dry_run:
@@ -1416,25 +1440,25 @@ class OzoneOMBootstrap:
                     result = self._run_remote_command(cm_host, kinit_cmd)
                     
                     if result.returncode != 0:
-                        print(f"ERROR: Failed to authenticate with Kerberos: {result.stderr}", file=sys.stderr)
+                        logger.error(f"Failed to authenticate with Kerberos: {result.stderr}")
                         return False
                     
-                    print("[>] Kerberos authentication successful")
+                    logger.info("[>] Kerberos authentication successful")
             else:
-                print("[>] Ozone security is disabled - no Kerberos authentication required")
+                logger.info("[>] Ozone security is disabled - no Kerberos authentication required")
             
             return True
             
         except Exception as e:
-            print(f"ERROR: Failed to check security configuration: {e}", file=sys.stderr)
+            logger.error(f"Failed to check security configuration: {e}")
             return False
     
     def run_bootstrap(self) -> bool:
         """Run the complete bootstrap process"""
         try:
-            print("=" * 80)
-            print("OZONE MANAGER BOOTSTRAP AUTOMATION")
-            print("=" * 80)
+            logger.info("=" * 80)
+            logger.info("OZONE MANAGER BOOTSTRAP AUTOMATION")
+            logger.info("=" * 80)
             
             # Step 1.0: Find healthy leader
             if not self.discover_cluster_info():
@@ -1468,24 +1492,25 @@ class OzoneOMBootstrap:
                 return False
             
             # Step 2.1: List last Ratis log files before bootstrapping
-            print("[2.1] Listing Ratis log files before bootstrapping...")
+            logger.info("[2.1] Listing Ratis log files before bootstrapping...")
             
             # Debug: Check if leader and follower are the same
             if self.leader_host == self.follower_host:
-                print(f"[DEBUG] Leader and follower are the same host: {self.leader_host}")
+                logger.info(f"[DEBUG] Leader and follower are the same host: {self.leader_host}")
                 # Only list once if they're the same
                 if not self.list_last_ratis_log("before", self.leader_host):
-                    print("WARNING: Failed to list Ratis log file before bootstrapping", file=sys.stderr)
+                    logger.warning("Failed to list Ratis log file before bootstrapping")
             else:
                 # List leader Ratis log
                 if not self.list_last_ratis_log("before", self.leader_host):
-                    print("WARNING: Failed to list leader Ratis log file before bootstrapping", file=sys.stderr)
+                    logger.warning("Failed to list leader Ratis log file before bootstrapping")
                 
                 # List follower Ratis log
                 if not self.list_last_ratis_log("before", self.follower_host):
-                    print("WARNING: Failed to list follower Ratis log file before bootstrapping", file=sys.stderr)
+                    logger.warning("Failed to list follower Ratis log file before bootstrapping")
             
             # Step 3.0: Stop follower
+            logger.info(f"[3.0] Stopping follower OM on {self.follower_host}...")
             if not self.stop_follower():
                 return False
             
@@ -1510,6 +1535,7 @@ class OzoneOMBootstrap:
                 return False
             
             # Step 6.0: Start follower
+            logger.info(f"[6.0] Starting follower OM on {self.follower_host}...")
             if not self.start_follower():
                 return False
             
@@ -1518,38 +1544,43 @@ class OzoneOMBootstrap:
                 return False
             
             # Step 7.1: List last Ratis log files after bootstrapping
-            print("[7.1] Listing Ratis log files after bootstrapping...")
+            logger.info("[7.1] Listing Ratis log files after bootstrapping...")
             
             # Debug: Check if leader and follower are the same
             if self.leader_host == self.follower_host:
-                print(f"[DEBUG] Leader and follower are the same host: {self.leader_host}")
+                logger.info(f"[DEBUG] Leader and follower are the same host: {self.leader_host}")
                 # Only list once if they're the same
                 if not self.list_last_ratis_log("after", self.leader_host):
-                    print("WARNING: Failed to list Ratis log file after bootstrapping", file=sys.stderr)
+                    logger.warning("Failed to list Ratis log file after bootstrapping")
             else:
                 # List leader Ratis log
                 if not self.list_last_ratis_log("after", self.leader_host):
-                    print("WARNING: Failed to list leader Ratis log file after bootstrapping", file=sys.stderr)
+                    logger.warning("Failed to list leader Ratis log file after bootstrapping")
                 
                 # List follower Ratis log
                 if not self.list_last_ratis_log("after", self.follower_host):
-                    print("WARNING: Failed to list follower Ratis log file after bootstrapping", file=sys.stderr)
+                    logger.warning("Failed to list follower Ratis log file after bootstrapping")
             
-            # Step 8.0: Restart OM role if it was stopped during bootstrap
+            # Step 7.2: Restart OM role if it was stopped during bootstrap
             if self.om_role_was_stopped:
-                print("[8.0] Restarting OM role that was stopped during bootstrap...")
+                logger.info("[7.2] Restarting OM role that was stopped during bootstrap...")
                 if not self.start_follower():
-                    print("WARNING: Failed to restart OM role", file=sys.stderr)
+                    logger.warning("Failed to restart OM role")
                 else:
-                    print("[>] OM role restarted successfully")
+                    logger.info("[>] OM role restarted successfully")
+
+            # Step 8.0: Test leadership transfer (optional)
+            if self.enable_leadership_transfer_test:
+                if not self.test_leadership_transfer():
+                    return False
             
-            print("=" * 80)
-            print("BOOTSTRAP PROCESS COMPLETED SUCCESSFULLY")
-            print("=" * 80)
+            logger.info("=" * 80)
+            logger.info("BOOTSTRAP PROCESS COMPLETED SUCCESSFULLY")
+            logger.info("=" * 80)
             return True
             
         except Exception as e:
-            print(f"ERROR: Bootstrap process failed: {e}", file=sys.stderr)
+            logger.error(f"Bootstrap process failed: {e}")
             return False
         finally:
             self.cleanup()
@@ -1562,34 +1593,34 @@ def main():
         epilog="""
 Examples:
   # List available clusters
-  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --list-clusters --insecure
+  ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --list-clusters --insecure
 
   # Run bootstrap with dry-run to see what would happen (unsecured cluster, root SSH user)
-  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
+  ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --insecure --dry-run
 
   # Run bootstrap with dry-run (secured cluster with Kerberos, root SSH user)
-  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
+  ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --keytab /etc/security/keytabs/om.keytab --principal om/om-node-2.example.com@REALM \\
     --insecure --dry-run
 
   # Run bootstrap with dry-run (non-root SSH user, requires sudo user)
-  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
+  ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --ssh-user admin --sudo-user hdfs --insecure --dry-run
 
   # Run actual bootstrap (unsecured cluster, root SSH user)
-  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
+  ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --insecure --yes
 
   # Run actual bootstrap (secured cluster with Kerberos, root SSH user)
-  python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \\
+  ./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \\
     --follower-host om-node-2.example.com --keytab /etc/security/keytabs/om.keytab --principal om/om-node-2.example.com@REALM \\
     --insecure --yes
         """
     )
     
     parser.add_argument("--cm-base-url", required=True,
-                       help="Cloudera Manager base URL (e.g., https://cm:7183)")
+                       help="Cloudera Manager base URL (e.g., https://<cm>:7183)")
     parser.add_argument("--cluster",
                        help="Cluster name (required unless --list-clusters is used)")
     parser.add_argument("--follower-host",
@@ -1614,6 +1645,8 @@ Examples:
                        help="SSH user for connecting to remote hosts (default: root)")
     parser.add_argument("--sudo-user",
                        help="Sudo user for running privileged commands (not needed when SSH user is root)")
+    parser.add_argument("--enable-leadership-transfer-test", action="store_true",
+                       help="Run step [8.0] to test leadership transfer after verifying status")
     parser.add_argument("--verbose", action="store_true",
                        help="Enable verbose (DEBUG) logging")
     
@@ -1666,7 +1699,8 @@ Examples:
         keytab=args.keytab,
         principal=args.principal,
         ssh_user=args.ssh_user,
-        sudo_user=args.sudo_user
+        sudo_user=args.sudo_user,
+        enable_leadership_transfer_test=args.enable_leadership_transfer_test
     )
     
     # Run bootstrap

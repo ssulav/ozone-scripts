@@ -6,23 +6,25 @@ This script automates the process of bootstrapping an unhealthy Ozone Manager fo
 
 The script performs the following steps:
 
-1. **Find healthy leader** (1.0): Discovers the Ozone service and identifies a healthy leader OM
-2. **Get configuration** (1.1): Retrieves OM database and Ratis directories from configuration
-3. **Check security configuration** (1.2): Validates Kerberos credentials if security is enabled
-4. **Check for snapshots** (1.3): Prompts user to confirm no snapshots exist before proceeding
-5. **Get OM roles from CLI** (2.0): Retrieves current OM roles and identifies leader/follower status
-6. **Check OM leader health** (2.1): Verifies the leader OM is healthy and performs leader switch if needed
-7. **List Ratis log files before bootstrapping** (2.2): Captures Ratis log state on both leader and follower
-8. **Stop follower** (3.0): Stops the target follower OM via Cloudera Manager
-9. **Test checkpoint endpoint** (4.0): Validates the checkpoint download endpoint is accessible
-10. **Download checkpoint** (4.1): Downloads the latest consistent checkpoint from the leader OM
-11. **Extract checkpoint** (4.2): Extracts the checkpoint to a temporary directory
-12. **Backup and replace database** (5.0): Backs up the current database and replaces it with the checkpoint
-13. **Backup Ratis logs** (5.1): Backs up existing Ratis logs to prevent conflicts
-14. **Start follower** (6.0): Starts the follower OM via Cloudera Manager
-15. **Verify status** (7.0): Verifies the OM is healthy and tests leadership transfer
-16. **List Ratis log files after bootstrapping** (7.1): Captures Ratis log state after bootstrapping for comparison
-17. **Restart OM role** (8.0): Restarts the OM role if it was stopped during the process
+- **[1.0] Discover Ozone service information**: Discovers the Ozone service and identifies a healthy leader OM
+- **[1.1] Validate SSH and sudo**: Validates SSH connectivity and sudo access to target hosts
+- **[1.2] Snapshot confirmation**: User confirmation gate; ensure no snapshots exist before proceeding
+- **[1.3] Get OM roles from CLI**: Retrieves current OM roles and identifies leader/follower status
+- **[1.4] Get configuration**: Retrieves OM database and Ratis directories from configuration
+- **[1.5] Check Ozone security configuration**: Validates Kerberos credentials if security is enabled
+- **[2.0] Verify OM leader health**: Verifies the leader OM is healthy and performs leader switch if needed
+- **[2.1] List Ratis log files before bootstrapping**: Captures Ratis log state on both leader and follower
+- **[3.0] Stop follower**: Stops the target follower OM via Cloudera Manager
+- **[4.0] Test checkpoint endpoint**: Validates the checkpoint download endpoint is accessible
+- **[4.1] Download checkpoint**: Downloads the latest consistent checkpoint from the leader OM
+- **[4.2] Extract checkpoint**: Extracts the checkpoint to a temporary directory
+- **[5.0] Backup and replace database**: Backs up the current database and replaces it with the checkpoint
+- **[5.1] Backup Ratis logs**: Backs up existing Ratis logs to prevent conflicts
+- **[6.0] Start follower**: Starts the follower OM via Cloudera Manager
+- **[7.0] Verify OM status**: Verifies the OM is healthy
+- **[7.1] List Ratis log files after bootstrapping**: Captures Ratis log state after bootstrapping for comparison
+- **[7.2] Restart OM role**: Restarts the OM role if it was stopped during the process
+- **[8.0] Test leadership transfer (optional)**: Verifies leadership transfer to the bootstrapped follower
 
 ## Prerequisites
 
@@ -51,16 +53,16 @@ chmod +x ozone_om_bootstrap.py
 
 ```bash
 # Run with dry-run to see what would happen (unsecured cluster, root SSH user)
-python ozone_om_bootstrap.py \
-  --cm-base-url https://cm:7183 \
+./ozone_om_bootstrap.py \
+  --cm-base-url https://<cm>:7183 \
   --cluster "Cluster 1" \
   --follower-host om-node-2.example.com \
   --insecure \
   --dry-run
 
 # Run with dry-run (secured cluster with Kerberos, root SSH user)
-python ozone_om_bootstrap.py \
-  --cm-base-url https://cm:7183 \
+./ozone_om_bootstrap.py \
+  --cm-base-url https://<cm>:7183 \
   --cluster "Cluster 1" \
   --follower-host om-node-2.example.com \
   --keytab /path/to/keytab \
@@ -69,8 +71,8 @@ python ozone_om_bootstrap.py \
   --dry-run
 
 # Run with dry-run (non-root SSH user, requires sudo user)
-python ozone_om_bootstrap.py \
-  --cm-base-url https://cm:7183 \
+./ozone_om_bootstrap.py \
+  --cm-base-url https://<cm>:7183 \
   --cluster "Cluster 1" \
   --follower-host om-node-2.example.com \
   --ssh-user admin \
@@ -79,16 +81,16 @@ python ozone_om_bootstrap.py \
   --dry-run
 
 # Run actual bootstrap (unsecured cluster, root SSH user)
-python ozone_om_bootstrap.py \
-  --cm-base-url https://cm:7183 \
+./ozone_om_bootstrap.py \
+  --cm-base-url https://<cm>:7183 \
   --cluster "Cluster 1" \
   --follower-host om-node-2.example.com \
   --insecure \
   --yes
 
 # Run actual bootstrap (secured cluster with Kerberos, root SSH user)
-python ozone_om_bootstrap.py \
-  --cm-base-url https://cm:7183 \
+./ozone_om_bootstrap.py \
+  --cm-base-url https://<cm>:7183 \
   --cluster "Cluster 1" \
   --follower-host om-node-2.example.com \
   --keytab /path/to/keytab \
@@ -117,7 +119,7 @@ python ozone_om_bootstrap.py \
 
 #### Example 1: Dry Run
 ```bash
-python ozone_om_bootstrap.py \
+./ozone_om_bootstrap.py \
   --cm-base-url https://cm.example.com:7183 \
   --cluster "Production Cluster" \
   --follower-host om-2.prod.example.com \
@@ -129,7 +131,7 @@ python ozone_om_bootstrap.py \
 
 #### Example 2: Actual Bootstrap
 ```bash
-python ozone_om_bootstrap.py \
+./ozone_om_bootstrap.py \
   --cm-base-url https://cm.example.com:7183 \
   --cluster "Production Cluster" \
   --follower-host om-2.prod.example.com \
@@ -141,7 +143,7 @@ python ozone_om_bootstrap.py \
 
 #### Example 3: Secured Cluster with Kerberos
 ```bash
-python ozone_om_bootstrap.py \
+./ozone_om_bootstrap.py \
   --cm-base-url https://cm.example.com:7183 \
   --cluster "Production Cluster" \
   --follower-host om-2.prod.example.com \
@@ -164,39 +166,30 @@ OZONE MANAGER BOOTSTRAP AUTOMATION
 [1.0] Discovering Ozone service information...
 [>] Ozone service: OZONE-1
 [>] Found 3 OM roles
-[1.1] Getting OM configuration...
-[>] OM DB directory: /var/lib/hadoop-ozone/om/data5
-[>] Ratis directory: /var/lib/hadoop-ozone/om/ratis5
-[>] HTTP Kerberos enabled: false
-[1.2] Checking security configuration...
-[>] Ozone security enabled: false
-[1.3] Prompting user to confirm no snapshots exist...
+[1.1] [SSH VALIDATION] Validating SSH connectivity...
+** [1.2] SNAPSHOT CONFIRMATION REQUIRED **
 
 ================================================================================
 **SNAPSHOT CONFIRMATION REQUIRED**
 ================================================================================
-** STOP! Do not proceed if the cluster enables Ozone Snapshot. Contact Cloudera Storage Engineering team for further instructions if that is the case. **
-================================================================================
-Before proceeding, please confirm that:
-1. You have NO snapshots in the Ozone system
-2. You understand that bootstrap operations may impact snapshots
-3. You have backed up any important data
-================================================================================
-Type 'NO' (exactly as shown) to continue with the bootstrap operation.
-Any other input will abort the operation.
-================================================================================
-Enter 'NO' to continue: NO
+
 [>] User confirmed to proceed with bootstrap operation
-[2.0] Getting OM roles from CLI...
+[1.3] Getting OM roles from CLI...
 [>] OM roles output:
 LEADER: om-1.prod.example.com
 FOLLOWER: om-2.prod.example.com
 FOLLOWER: om-3.prod.example.com
 [>] Leader OM: om-1.prod.example.com
 [>] Target follower: om-2.prod.example.com
-[2.1] Checking OM leader health...
+[1.4] Getting OM configuration...
+[>] OM DB directory: /var/lib/hadoop-ozone/om/data5
+[>] Ratis directory: /var/lib/hadoop-ozone/om/ratis5
+[>] HTTP Kerberos enabled: false
+[1.5] Checking Ozone security configuration...
+[>] Ozone security enabled: false
+[2.0] Verifying leader OM health...
 [>] Using leader: om-1.prod.example.com
-[2.2] Listing last Ratis log files before bootstrapping...
+[2.1] Listing last Ratis log files before bootstrapping...
 [>] LEADER (om-1.prod.example.com): Last log file: log_inprogress_82838
 [>] FOLLOWER (om-2.prod.example.com): Last log file: log_inprogress_73046
 [3.0] Stopping follower OM on om-2.prod.example.com...
@@ -220,8 +213,10 @@ FOLLOWER: om-3.prod.example.com
 [7.1] Listing last Ratis log files after bootstrapping...
 [>] LEADER (om-1.prod.example.com): Last log file: log_inprogress_82838 (unchanged)
 [>] FOLLOWER (om-2.prod.example.com): Last log file: log_inprogress_82838 (changed)
-[8.0] Restarting OM role if it was stopped during bootstrap...
+[7.2] Restarting OM role if it was stopped during bootstrap...
 [>] OM role was stopped during bootstrap, ensuring it's started
+[8.0] Testing leadership transfer...
+[>] Leadership transfer confirmed: om-2.prod.example.com is now leader
 ================================================================================
 BOOTSTRAP PROCESS COMPLETED SUCCESSFULLY
 ================================================================================
@@ -326,10 +321,10 @@ Before proceeding, please confirm that:
 2. You understand that bootstrap operations may impact snapshots
 3. You have backed up any important data
 ================================================================================
-Type 'NO' (exactly as shown) to continue with the bootstrap operation.
+Type 'Continue' (exactly as shown) to proceed with the bootstrap operation.
 Any other input will abort the operation.
 ================================================================================
-Enter 'NO' to continue: 
+Enter 'Continue' to proceed: 
 ```
 
 ### Best Practices
@@ -345,14 +340,14 @@ The script automatically detects if Ozone security is enabled by reading the `oz
 ### Unsecured Clusters
 For clusters where Ozone security is disabled, no additional authentication is required:
 ```bash
-python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \
+./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \
   --follower-host om-node-2.example.com --insecure --dry-run
 ```
 
 ### Secured Clusters (Kerberos)
 For clusters where Ozone security is enabled, Kerberos authentication is required:
 ```bash
-python ozone_om_bootstrap.py --cm-base-url https://cm:7183 --cluster "Cluster 1" \
+./ozone_om_bootstrap.py --cm-base-url https://<cm>:7183 --cluster "Cluster 1" \
   --follower-host om-node-2.example.com --keytab /etc/security/keytabs/om.keytab --principal om/om-node-2.example.com@REALM \
   --insecure --dry-run
 ```
@@ -364,4 +359,3 @@ The script will:
 4. Test Kerberos authentication before proceeding
 5. Automatically add `kinit` commands to all Ozone CLI operations
 
-### Examples
