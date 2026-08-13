@@ -13,23 +13,56 @@
 # Ranger curl steps: shows the curl command, runs it in this same pane
 # when you press Enter, prints the response, then waits before continuing.
 #
-# Override defaults via environment variables, e.g.:
-#   RANGER_HOST=... OZONE_S3G_HOST=... \
-#   RANGER_ADMIN_USER=admin RANGER_ADMIN_PASS=secret \
-#   ./ozone_sts_demo.sh
+# Required hosts (env or positional args — no defaults):
+#   RANGER_HOST=... OZONE_S3G_HOST=... ./ozone_sts_demo.sh
+#   ./ozone_sts_demo.sh <RANGER_HOST> <OZONE_S3G_HOST>
 #
-# Run all commands without prompts:
-#   AUTO_RUN=1 ./ozone_sts_demo.sh
+# Optional:
+#   RANGER_ADMIN_USER=admin RANGER_ADMIN_PASS=secret \
+#   AUTO_RUN=1 START_STEP=6 DEMO_RUN_ID=12345 ./ozone_sts_demo.sh ranger.host ozone.host
 
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+usage() {
+  cat <<EOF >&2
+Usage: $(basename "$0") [RANGER_HOST OZONE_S3G_HOST]
+
+Required — set via environment or as two positional arguments:
+  RANGER_HOST      Ranger Admin host FQDN
+  OZONE_S3G_HOST   Ozone S3 Gateway host FQDN
+
+Examples:
+  RANGER_HOST=ranger.example.com OZONE_S3G_HOST=ozone.example.com $(basename "$0")
+  $(basename "$0") ranger.example.com ozone.example.com
+  AUTO_RUN=1 $(basename "$0") ranger.example.com ozone.example.com
+EOF
+  exit 1
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
+RANGER_HOST="${RANGER_HOST:-}"
+OZONE_S3G_HOST="${OZONE_S3G_HOST:-}"
+if [[ $# -ge 2 ]]; then
+  RANGER_HOST="$1"
+  OZONE_S3G_HOST="$2"
+  shift 2
+elif [[ $# -eq 1 ]]; then
+  echo "Error: provide both RANGER_HOST and OZONE_S3G_HOST." >&2
+  usage
+fi
+if [[ -z "${RANGER_HOST}" || -z "${OZONE_S3G_HOST}" ]]; then
+  echo "Error: RANGER_HOST and OZONE_S3G_HOST are required." >&2
+  usage
+fi
+
 # ---------------------------------------------------------------------------
 # Configuration (edit or export before running)
 # ---------------------------------------------------------------------------
-RANGER_HOST="${RANGER_HOST:-ccycloud-1.fb81615635-bha.root.comops.site}"
-OZONE_S3G_HOST="${OZONE_S3G_HOST:-ccycloud-1.fb81615635-01.root.comops.site}"
 RANGER_PORT="${RANGER_PORT:-6182}"
 OZONE_S3G_PORT="${OZONE_S3G_PORT:-9879}"
 OZONE_STS_PORT="${OZONE_STS_PORT:-9881}"
